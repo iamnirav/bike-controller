@@ -46,8 +46,8 @@ on yours. Any evdev gamepad works; nothing assumes 8BitDo.
 On the Pi:
 
 ```bash
-git clone <this-repo> && cd bike-controller
-./install.sh
+git clone https://github.com/iamnirav/bike-controller.git
+cd bike-controller && ./install.sh
 ```
 
 It derives almost everything: paths from wherever you cloned it, the desktop user
