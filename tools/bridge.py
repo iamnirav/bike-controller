@@ -81,12 +81,11 @@ class ControllerHolder:
     """
 
     def __init__(self) -> None:
-        self.reader = None
+        self.reader: ControllerReader | None = None
 
     def rumble(self, name: str) -> None:
-        reader = self.reader
-        if reader is not None and reader.rumbler.available:
-            reader.rumbler.play(name)
+        if self.can_rumble:
+            self.reader.rumbler.play(name)
 
     @property
     def can_rumble(self) -> bool:
@@ -278,7 +277,7 @@ def parse_button(spec: str) -> ButtonRule:
 
 
 async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
-                         poll_interval: float = 0.2) -> None:
+                         poll_interval: float) -> None:
     """Keep a bike link alive, reconnecting indefinitely.
 
     This must never give up. At boot the console is asleep and unreachable, and
@@ -570,6 +569,11 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"--movement-min ({args.movement_min})")
     if not 0.0 <= args.movement_floor < 1.0:
         parser.error("--movement-floor must be in [0.0, 1.0)")
+    if not 0.0 < args.poll_interval <= 0.5:
+        # The staleness window is derived from this, so an unbounded value buys
+        # seconds of full-deflection movement from a dead bike. The model behind
+        # stale_after_for is only calibrated over 0.02-0.2 anyway.
+        parser.error(f"--poll-interval ({args.poll_interval}) must be in (0, 0.5]")
     if not hasattr(e, args.sprint_button):
         parser.error(f"unknown --sprint-button {args.sprint_button!r}")
 
@@ -634,7 +638,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
 
 
 def print_banner(args, settings: Settings, launcher: "Launcher",
-                 detector, pad: VirtualGamepad) -> None:
+                 detector, pad: VirtualGamepad, mapper: Mapper) -> None:
     """Startup summary.
 
     deploy.sh greps journalctl for these exact lines as its post-restart smoke
@@ -660,8 +664,6 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
         floor = f", floor {movement.floor:.2f}" if movement.floor else ""
         print(f"Movement: left stick scaled by {movement.source} "
               f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
-        print(f"Fail-safe: movement zeroes after "
-              f"{config.stale_after or 1.5:.2f}s without telemetry")
     else:
         print("Movement: off")
 
@@ -672,6 +674,11 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     else:
         print("Sprint: off")
 
+    # stale_after governs the gate as well as movement, so it is not part of
+    # the movement branch. Read from the tracker: the config value can be None,
+    # and duplicating CadenceTracker's default here would let the banner lie.
+    print(f"Fail-safe: input zeroes after "
+          f"{mapper.tracker.stale_after:.2f}s without telemetry")
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
 
@@ -692,15 +699,10 @@ async def main() -> int:
     settings = build_settings(args, parser)
     mapper = Mapper(settings.config)
     status = Status()
-    holder: dict = {"reader": None}
-
-    def rumble(name: str) -> None:
-        reader = holder.reader
-        if reader is not None and reader.rumbler.available:
-            reader.rumbler.play(name)
-
+    holder = ControllerHolder()
     launcher = Launcher(
-        [args.launch_on_input] if args.launch_on_input else None, rumble=rumble
+        [args.launch_on_input] if args.launch_on_input else None,
+        rumble=holder.rumble,
     )
     detector = SequenceDetector(KONAMI) if args.launch_trigger == "konami" else None
 
@@ -731,7 +733,7 @@ async def main() -> int:
             stop.set()
 
     with VirtualGamepad() as pad:
-        print_banner(args, settings, launcher, detector, pad)
+        print_banner(args, settings, launcher, detector, pad, mapper)
 
         tasks = [asyncio.create_task(
             output_loop(pad, mapper, holder, settings.wiring, status, stop))]

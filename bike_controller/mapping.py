@@ -150,11 +150,10 @@ class MovementConfig:
 
 @dataclass
 class ButtonRule:
-    """Fires while cadence is inside [min_rpm, max_rpm)."""
+    """Holds a button while cadence is at or above min_rpm."""
 
     name: str
     min_rpm: float
-    max_rpm: float = 1e9
 
 
 def stale_after_for(poll_interval: float, packets_per_cycle: int = 5,
@@ -172,7 +171,13 @@ def stale_after_for(poll_interval: float, packets_per_cycle: int = 5,
     rate tripled the constant did not follow.
     """
     period = packets_per_cycle * (poll_interval + 0.03)
-    return max(1.5, frames_of_margin * period)
+    # Clamped at both ends. The floor suits the fastest poll rate; the cap
+    # matters more -- without it a typo'd --poll-interval silently buys tens of
+    # seconds of full-deflection movement from a dead bike, which is precisely
+    # what this window exists to prevent. Past a few seconds the right answer
+    # stops being "scale with the poll rate" and becomes "this feed is too slow
+    # to drive movement safely at all".
+    return min(3.0, max(1.5, frames_of_margin * period))
 
 
 @dataclass
@@ -301,7 +306,7 @@ class Mapper:
             out.axis = min(1.0, max(0.0, fraction))
 
         for rule in self.config.buttons:
-            if rule.min_rpm <= cadence < rule.max_rpm:
+            if cadence >= rule.min_rpm:
                 out.buttons.add(rule.name)
 
         return out

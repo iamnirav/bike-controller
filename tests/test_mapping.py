@@ -185,8 +185,10 @@ def test_dropped_frames_do_not_kill_movement_at_any_poll_rate():
     for several seconds. Deriving the window from the poll interval fixes it at
     every rate -- so this checks every rate, not just the deployed one.
     """
-    for poll_interval in (0.05, 0.1, 0.2):
-        period = 5 * (poll_interval + 0.03)
+    # MEASURED periods from the README table, not the model's own formula --
+    # re-deriving the model here would make the test self-consistent by
+    # construction and blind to model error.
+    for poll_interval, period in ((0.05, 0.391), (0.1, 0.513), (0.2, 1.299)):
         stale = stale_after_for(poll_interval)
         movement = MovementConfig(enabled=True, source="power",
                                   min_value=0.0, max_value=75.0)
@@ -235,6 +237,78 @@ def test_stale_decay_is_framerate_independent():
 
     spread = max(closing_times) - min(closing_times)
     assert spread < 0.3, f"decay time varies with frame rate: {closing_times}"
+
+
+def test_cadence_is_actually_smoothed():
+    """Deleting the EMA entirely used to pass the whole suite.
+
+    Steady-state tests converge, so smoothed and raw agree by the time they
+    assert. This drives the output loop's real 60 Hz rate and checks the
+    TRANSIENT, which is the only place a filter is visible. Evaluating once a
+    second later would not work: the filter is framerate-independent, so over a
+    1 s gap it converges ~95% and looks like no filter at all.
+    """
+    mapper = make_mapper()
+    step = 1.0 / FRAME_HZ
+    t = 0.0
+    while t < 2.0:                       # settle at rest
+        mapper.submit(0.0, 0.0, now=t)
+        mapper.evaluate(now=t)
+        t += step
+
+    start = t
+    out = None
+    while t < start + 0.1:               # hard step to 80 rpm
+        mapper.submit(80.0, 110.0, now=t)
+        out = mapper.evaluate(now=t)
+        t += step
+    assert out.cadence < 40.0, (
+        f"cadence reached {out.cadence:.1f} within 0.1s of an 80 rpm step; "
+        f"the filter is not doing anything"
+    )
+
+    while t < start + 3.0:
+        mapper.submit(80.0, 110.0, now=t)
+        out = mapper.evaluate(now=t)
+        t += step
+    assert out.cadence > 70.0, f"filter never converged: {out.cadence:.1f}"
+
+
+def test_stale_decay_is_a_ramp_not_an_instant_drop():
+    """Replacing the decay ramp with an instant zero used to pass everything.
+
+    test_stale_decay_is_framerate_independent passes trivially with no decay at
+    all -- instant zero is perfectly framerate-independent.
+    """
+    tracker = CadenceTracker()
+    step = 1.0 / FRAME_HZ
+    t = 0.0
+    while t < 1.0:                       # converge well inside the stale window
+        tracker.submit(80.0, now=t)
+        tracker.value(now=t)
+        t += step
+    last_sample = t
+
+    before = tracker.value(now=last_sample + tracker.stale_after - 0.01)
+    assert before > 70.0, f"decayed before going stale: {before:.1f}"
+
+    halfway = tracker.value(
+        now=last_sample + tracker.stale_after + tracker.decay_to_zero_over / 2)
+    assert 0.0 < halfway < before, (
+        f"expected a partial value halfway through the ramp, got {halfway:.1f} "
+        f"(0.0 means instant drop, {before:.1f} means no decay at all)"
+    )
+
+    gone = tracker.value(
+        now=last_sample + tracker.stale_after + tracker.decay_to_zero_over + 0.1)
+    assert gone == 0.0, f"ramp never reached zero: {gone:.1f}"
+
+
+def test_stale_window_is_floored_and_capped():
+    assert stale_after_for(0.02) == 1.5, "floor not applied at the fast end"
+    assert stale_after_for(2.0) == 3.0, (
+        "no cap: a slow poll interval buys seconds of movement from a dead bike"
+    )
 
 
 def test_axis_is_clamped_and_monotonic():

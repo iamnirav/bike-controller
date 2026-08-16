@@ -39,12 +39,42 @@ REMOTE_TESTS
 ssh -n "$HOST" "chmod +x $REMOTE/tools/*.sh"
 
 if [ "$RESTART" -eq 1 ]; then
+    # Smoke run BEFORE restarting. The banner prints before any task starts, so
+    # grepping it proves only that argument parsing worked -- a bridge that dies
+    # on its first output frame emits every line the grep looks for. This runs
+    # the real thing on the real machine and requires it to survive.
+    echo "==> smoke run (must survive 6s)"
+    ssh -n "$HOST" "sudo systemctl stop bike-bridge 2>/dev/null; \
+        cd $REMOTE && sudo timeout 6 ./.venv/bin/python -u tools/bridge.py \
+            --simulate-bike --no-controller --movement power >/tmp/smoke.log 2>&1; \
+        rc=\$?; \
+        if [ \$rc -ne 124 ]; then \
+            echo '    FAILED - bridge did not survive 6s:'; \
+            tail -15 /tmp/smoke.log; exit 1; \
+        fi; \
+        echo '    survived'"
+
     echo "==> installing unit and restarting"
     ssh -n "$HOST" "sudo cp $REMOTE/systemd/bike-bridge.service /etc/systemd/system/ && \
                     sudo systemctl daemon-reload && \
                     sudo systemctl restart bike-bridge && sleep 12 && \
                     sudo journalctl -u bike-bridge --no-pager -o cat --since '-15s' \
                       | grep -E 'Movement|Sprint|Haptics|Launch trigger|controller acquired' || true"
+
+    # Scoped to the CURRENT invocation: a time window would surface FATALs from
+    # a previous crash loop and fail a deploy that actually fixed them.
+    echo "==> post-restart health"
+    ssh -n "$HOST" "sudo systemctl is-active --quiet bike-bridge \
+            || { echo '    unit is not active'; exit 1; }; \
+        INV=\$(systemctl show -p InvocationID --value bike-bridge); \
+        if sudo journalctl -u bike-bridge _SYSTEMD_INVOCATION_ID=\$INV --no-pager \
+             | grep -q FATAL; then \
+            echo '    FATAL in this invocation:'; \
+            sudo journalctl -u bike-bridge _SYSTEMD_INVOCATION_ID=\$INV --no-pager -o cat \
+              | grep FATAL | tail -3; \
+            exit 1; \
+        fi; \
+        echo '    healthy'"
 else
     echo "==> skipped restart"
 fi
