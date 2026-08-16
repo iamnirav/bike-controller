@@ -27,12 +27,32 @@ MOVEMENT_MAX_PERCENTILE = 50
 SPRINT_PERCENTILE = 90
 
 
-def load(paths: list[Path]) -> list[dict]:
+REQUIRED = ("cadence_rpm", "power_w", "movement_scale", "sprint")
+
+
+def load(paths: list[Path]) -> tuple[list[dict], int]:
+    """Rows, plus a count of unusable ones.
+
+    ridelog flushes per row precisely because rides end with a power cut, so a
+    torn final row is expected, not exceptional. Returning a traceback for the
+    ride you just finished would be a poor reward.
+    """
     rows: list[dict] = []
+    skipped = 0
     for path in paths:
         with path.open() as fh:
-            rows.extend(csv.DictReader(fh))
-    return rows
+            for row in csv.DictReader(fh):
+                try:
+                    if any(row.get(f) in (None, "") for f in REQUIRED):
+                        raise ValueError
+                    float(row["cadence_rpm"])
+                    float(row["power_w"])
+                    float(row["movement_scale"])
+                except (ValueError, TypeError):
+                    skipped += 1
+                    continue
+                rows.append(row)
+    return rows, skipped
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -72,7 +92,7 @@ def main() -> int:
         print("No ride logs found.")
         return 1
 
-    rows = load(files)
+    rows, skipped = load(files)
     if not rows:
         print(f"{len(files)} file(s), but no rows.")
         return 1
@@ -80,12 +100,18 @@ def main() -> int:
     # "Riding" excludes coasting: thresholds should be set from the effort you
     # actually produce, not diluted by the stops in between.
     riding = [r for r in rows if float(r["cadence_rpm"]) > 0]
+    if not riding:
+        print(f"{len(rows)} samples, but none while pedalling — nothing to report.")
+        return 1
     powers = [float(r["power_w"]) for r in riding]
     cadences = [float(r["cadence_rpm"]) for r in riding]
     at_max = sum(1 for r in riding if float(r["movement_scale"]) >= 0.999)
     sprinting = sum(1 for r in riding if r["sprint"] == "1")
     resistances = sorted({int(float(r["resistance"])) for r in rows})
 
+    if skipped:
+        print(f"\nskipped {skipped} truncated row(s) — expected if a ride "
+              f"ended with a power cut")
     print(f"\n{len(files)} ride log(s), {len(rows)} samples, "
           f"{len(riding)} while pedalling ({100 * len(riding) / len(rows):.0f}%)")
     print(f"resistance levels used: {resistances}\n")
@@ -98,11 +124,15 @@ def main() -> int:
 
     suggested_max = percentile(powers, MOVEMENT_MAX_PERCENTILE)
     suggested_sprint = percentile(powers, SPRINT_PERCENTILE)
-    print(f"\nSuggested from this data:")
+    print("\nSuggested from this data:")
     print(f"  --movement-max {suggested_max:.0f}   "
           f"(p{MOVEMENT_MAX_PERCENTILE} of riding power; currently {args.movement_max:.0f})")
     print(f"  --sprint-at    {suggested_sprint:.0f}   "
           f"(p{SPRINT_PERCENTILE}; currently {args.sprint_at:.0f})")
+    print("  Note: riding power is shaped by the CURRENT --movement-max — past "
+          "full deflection\n  there is no reward for pushing harder, so a low "
+          "max depresses p50 and re-suggests\n  a low max. Weigh the "
+          "percentages above more than the suggestion.")
 
     # The percentages above are the honest check: a suggestion derived from one
     # short ride is weaker evidence than what actually happened during it.

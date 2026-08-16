@@ -23,6 +23,7 @@ produces an ioctl the kernel does not recognise.
 from __future__ import annotations
 
 import ctypes
+import errno
 import fcntl
 import os
 import struct
@@ -173,6 +174,7 @@ class FFUInput:
                  bustype: int, buttons, axes, ff_effects_max: int = 16) -> None:
         self.name = name
         self.effects: dict[int, tuple[int, int]] = {}     # id -> (strong, weak)
+        self.failures = 0
         self._fd = os.open("/dev/uinput", os.O_RDWR | os.O_NONBLOCK)
         try:
             fcntl.ioctl(self._fd, UI_SET_EVBIT, EV_KEY)
@@ -200,6 +202,14 @@ class FFUInput:
         except Exception:
             os.close(self._fd)
             raise
+
+    def _note_failure(self, message: str) -> None:
+        """Report the first ioctl failure. Silence here would present as
+        'rumble stopped working sometime last month'."""
+        self.failures += 1
+        if self.failures == 1:
+            print(f"  force-feedback ioctl failed ({message}); "
+                  f"further failures suppressed", flush=True)
 
     def write(self, type_: int, code: int, value: int) -> None:
         os.write(self._fd, struct.pack(_EVENT_FORMAT, 0, 0, type_, code, value))
@@ -229,24 +239,44 @@ class FFUInput:
                 upload = _UinputFfUpload(request_id=value)
                 try:
                     fcntl.ioctl(self._fd, UI_BEGIN_FF_UPLOAD, upload)
+                except OSError as exc:
+                    self._note_failure(f"UI_BEGIN_FF_UPLOAD: {exc}")
+                    continue        # nothing was begun, so nothing to answer
+                # From here the request MUST be answered. Returning without
+                # UI_END_FF_UPLOAD leaves the uploader -- a Chromium gamepad
+                # thread -- blocked in its ioctl, which is the exact failure
+                # this module exists to avoid.
+                try:
                     if upload.effect.type == FF_RUMBLE:
                         self.effects[upload.effect.id] = (
                             upload.effect.u.rumble.strong_magnitude,
                             upload.effect.u.rumble.weak_magnitude,
                         )
-                    upload.retval = 0            # accept
-                    fcntl.ioctl(self._fd, UI_END_FF_UPLOAD, upload)
-                except OSError:
-                    pass
+                        upload.retval = 0                    # accept
+                    else:
+                        upload.retval = -errno.EINVAL        # reject honestly
+                except Exception:                            # noqa: BLE001
+                    upload.retval = -errno.EIO
+                finally:
+                    try:
+                        fcntl.ioctl(self._fd, UI_END_FF_UPLOAD, upload)
+                    except OSError as exc:
+                        self._note_failure(f"UI_END_FF_UPLOAD: {exc}")
             elif type_ == EV_UINPUT and code == UI_FF_ERASE:
                 erase = _UinputFfErase(request_id=value)
                 try:
                     fcntl.ioctl(self._fd, UI_BEGIN_FF_ERASE, erase)
+                except OSError as exc:
+                    self._note_failure(f"UI_BEGIN_FF_ERASE: {exc}")
+                    continue
+                try:
                     self.effects.pop(erase.effect_id, None)
                     erase.retval = 0
-                    fcntl.ioctl(self._fd, UI_END_FF_ERASE, erase)
-                except OSError:
-                    pass
+                finally:
+                    try:
+                        fcntl.ioctl(self._fd, UI_END_FF_ERASE, erase)
+                    except OSError as exc:
+                        self._note_failure(f"UI_END_FF_ERASE: {exc}")
             elif type_ == EV_FF and value >= 1:
                 # The game is playing a previously-uploaded effect.
                 magnitudes = self.effects.get(code)

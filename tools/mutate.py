@@ -66,9 +66,25 @@ MUTANTS = [
      "        if self.index and token != self.sequence[self.index]:\n"
      "            self.index = 0"),
     ("bike_controller/ridelog.py", "ride log records idle time too",
-     "            if self._last_active is None or now - self._last_active > self.idle_grace:\n"
+     "            if now - self._last_active > self.idle_grace:",
+     "            if False and now - self._last_active > self.idle_grace:"),
+    ("bike_controller/ridelog.py", "ride log never rotates between rides",
+     "                if self._file is not None:\n"
+     "                    self._file.close()\n"
+     "                    self._file = None\n"
+     "                    self._writer = None\n"
      "                return",
-     "            if False:\n                return"),
+     "                return"),
+    ("bike_controller/watchdog.py", "watchdog claims health with no working socket",
+     "            else:\n                self._socket = sock",
+     "            else:\n                self._socket = sock\n"
+     "            self._socket = self._socket or socket.socket("
+     "socket.AF_UNIX, socket.SOCK_DGRAM)"),
+    # NOTE: uinput_ff.py's upload/erase handshake is deliberately NOT mutated
+    # here. Exercising it needs a real /dev/uinput and a kernel, which this
+    # harness does not have -- a mutant that can never be killed is noise, not
+    # signal. deploy.sh covers that path by running the bridge with
+    # --rumble-passthrough on the Pi and requiring the pad to advertise EV_FF.
 ]
 
 

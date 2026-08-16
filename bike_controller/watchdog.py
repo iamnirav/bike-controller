@@ -36,9 +36,20 @@ class Watchdog:
         if self._address:
             # A leading '@' means the Linux abstract namespace, spelled NUL.
             path = "\0" + self._address[1:] if self._address[0] == "@" else self._address
-            with contextlib.suppress(OSError):
-                self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                self._socket.connect(path)
+            # Assign only on success. Assigning before connect() left a created
+            # but unconnected socket behind on failure, so `enabled` and
+            # `active` both claimed to be working while nothing was delivered.
+            # Under Type=notify that is fatal, not degraded: systemd kills the
+            # unit when READY=1 never arrives, and again when pings stop.
+            try:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                sock.connect(path)
+            except OSError as exc:
+                print(f"  watchdog socket unavailable ({exc}); not supervised")
+                with contextlib.suppress(Exception):
+                    sock.close()
+            else:
+                self._socket = sock
 
     @property
     def enabled(self) -> bool:

@@ -338,7 +338,17 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
             backoff = min(30.0, backoff * 1.5)
 
 
-async def feed_simulated(mapper: Mapper, status: Status) -> None:
+class _SimSample:
+    """Minimal stand-in for BikeState, so simulation can feed the ride log."""
+
+    __slots__ = ("cadence_rpm", "power_w", "resistance")
+
+    def __init__(self, cadence_rpm: int, power_w: int) -> None:
+        self.cadence_rpm, self.power_w, self.resistance = cadence_rpm, power_w, 0
+
+
+async def feed_simulated(mapper: Mapper, status: Status,
+                        ride_log: RideLogger | None = None) -> None:
     """A slow cadence sweep, so gate/axis behaviour is visible in a browser."""
     status.bike = "simulated"
     start = time.monotonic()
@@ -350,6 +360,10 @@ async def feed_simulated(mapper: Mapper, status: Status) -> None:
         power = max(0.0, 2.0 * (cadence - 25.0))
         status.cadence_raw = round(cadence)
         mapper.submit(cadence, power)
+        if ride_log is not None:
+            # Also logged in simulation, so --ride-log is exercised by the
+            # deploy smoke run rather than only ever on a real ride.
+            ride_log.log(_SimSample(round(cadence), round(power)), status)
         # Mirror the deployed telemetry rate (~2.56 Hz), not the original
         # ~0.87 Hz -- otherwise the simulator runs closer to the staleness
         # window than the real thing ever does.
@@ -470,14 +484,18 @@ async def output_loop(
         if out.sprint and wiring.sprint_code is not None:
             pad.set_button(wiring.sprint_code, True)
 
-        if wiring.rumble and holder.can_rumble:
+        if wiring.rumble:
             # Rising edges only. The hysteresis in mapping.py matters more here
             # than it did with paired on/off cues: without it, effort hovering
             # at a threshold would re-fire the SAME cue over and over.
+            #
+            # Via the holder, not the `reader` local captured above: that local
+            # can go stale, and mixing it with a live can_rumble check is the
+            # same invisible invariant snapshot() was added to remove.
             if out.at_max and not prev_max:
-                reader.rumbler.play("max_on")
+                holder.rumble("max_on")
             if out.sprint and not prev_sprint:
-                reader.rumbler.play("sprint_on")
+                holder.rumble("sprint_on")
         prev_max, prev_sprint = out.at_max, out.sprint
 
         # Serviced every frame: an unanswered FF upload leaves the BROWSER
@@ -670,7 +688,8 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
 
 
 def print_banner(args, settings: Settings, launcher: "Launcher",
-                 detector, pad: VirtualGamepad, mapper: Mapper) -> None:
+                 detector, pad: VirtualGamepad, mapper: Mapper,
+                 watchdog: Watchdog) -> None:
     """Startup summary.
 
     deploy.sh greps journalctl for these exact lines as its post-restart smoke
@@ -714,6 +733,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     print(f"Fail-safe: input zeroes after "
           f"{mapper.tracker.stale_after:.2f}s without telemetry")
     print(f"Ride log: {args.ride_log or 'off'}")
+    print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
 
@@ -770,13 +790,13 @@ async def main() -> int:
             stop.set()
 
     with VirtualGamepad(force_feedback=args.rumble_passthrough) as pad:
-        print_banner(args, settings, launcher, detector, pad, mapper)
+        print_banner(args, settings, launcher, detector, pad, mapper, watchdog)
 
         tasks = [asyncio.create_task(
             output_loop(pad, mapper, holder, settings.wiring, status, stop,
                         watchdog))]
         if args.simulate_bike:
-            tasks.append(asyncio.create_task(feed_simulated(mapper, status)))
+            tasks.append(asyncio.create_task(feed_simulated(mapper, status, ride_log)))
         else:
             tasks.append(asyncio.create_task(
                 feed_from_bike(args.address, mapper, status, args.poll_interval,
@@ -791,11 +811,6 @@ async def main() -> int:
         for task in tasks:
             task.add_done_callback(on_task_done)
 
-        if watchdog.active:
-            print(f"Watchdog: pinging every {watchdog.interval:.1f}s from the "
-                  f"output loop")
-        else:
-            print("Watchdog: not supervised")
         watchdog.ready()
 
         print("Running. Ctrl-C to stop.\n")

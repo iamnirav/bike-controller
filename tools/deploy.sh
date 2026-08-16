@@ -48,16 +48,26 @@ if [ "$RESTART" -eq 1 ]; then
     # grepping it proves only that argument parsing worked -- a bridge that dies
     # on its first output frame emits every line the grep looks for. This runs
     # the real thing on the real machine and requires it to survive.
-    echo "==> smoke run (must survive 6s)"
+    # Exercises BOTH risky paths: the ctypes force-feedback device (the most
+    # likely thing to break on a kernel upgrade, and whose failure blocks the
+    # browser rather than merely going quiet) and ride logging.
+    echo "==> smoke run (must survive 8s, with FF and ride log)"
     ssh -n "$HOST" "sudo systemctl stop bike-bridge 2>/dev/null; \
-        cd $REMOTE && sudo timeout 6 ./.venv/bin/python -u tools/bridge.py \
-            --simulate-bike --no-controller --movement power >/tmp/smoke.log 2>&1; \
+        rm -rf /tmp/smoke-rides; \
+        cd $REMOTE && sudo timeout 8 ./.venv/bin/python -u tools/bridge.py \
+            --simulate-bike --no-controller --movement power \
+            --rumble-passthrough --ride-log /tmp/smoke-rides >/tmp/smoke.log 2>&1; \
         rc=\$?; \
         if [ \$rc -ne 124 ]; then \
-            echo '    FAILED - bridge did not survive 6s:'; \
+            echo '    FAILED - bridge did not survive 8s:'; \
             tail -15 /tmp/smoke.log; exit 1; \
         fi; \
-        echo '    survived'"
+        grep -q 'Rumble passthrough: on' /tmp/smoke.log \
+            || { echo '    FAILED - force feedback did not come up:'; \
+                 grep -i rumble /tmp/smoke.log; exit 1; }; \
+        ls /tmp/smoke-rides/ride-*.csv >/dev/null 2>&1 \
+            || { echo '    FAILED - no ride log written'; exit 1; }; \
+        echo '    survived; force feedback up; ride log written'"
 
     echo "==> installing unit and restarting"
     ssh -n "$HOST" "sudo cp $REMOTE/systemd/bike-bridge.service /etc/systemd/system/ && \

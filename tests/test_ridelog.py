@@ -75,6 +75,46 @@ def test_rows_stop_after_the_idle_grace_expires():
         assert len(rows_of(logger.path)) == 1
 
 
+def test_a_new_ride_gets_a_new_file():
+    """One bridge run can span weeks of uptime and many rides.
+
+    Without rotation every ride appends to one file, and ride_report merges
+    unrelated rides into a single power distribution -- describing neither.
+    """
+    import bike_controller.ridelog as ridelog
+
+    clock = [1000.0]
+
+    class FakeClock:
+        # Replace the module's `time` reference, not time.monotonic itself --
+        # patching the stdlib module would leak into every other test.
+        @staticmethod
+        def monotonic():
+            return clock[0]
+
+    real_time = ridelog.time
+    ridelog.time = FakeClock
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = RideLogger(tmp, idle_grace=60.0)
+            logger.log(Sample(cadence=60, power=70), FakeStatus(move=0.9))
+            first = logger.path
+
+            clock[0] += 3 * 3600                     # three hours later
+            logger.log(Sample(cadence=0), FakeStatus())      # closes the file
+            clock[0] += 1
+            logger.log(Sample(cadence=64, power=78), FakeStatus(move=0.95))
+            logger.close()
+
+            files = sorted(Path(tmp).iterdir())
+            assert len(files) == 2, (
+                f"expected one file per ride, got {[f.name for f in files]}"
+            )
+            assert logger.path != first
+    finally:
+        ridelog.time = real_time
+
+
 def test_logging_never_raises():
     """A logging failure must never take down the bridge mid-ride."""
     logger = RideLogger("/proc/definitely-not-writable/nope")
