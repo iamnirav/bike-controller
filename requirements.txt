@@ -1,5 +1,9 @@
 # Bike side (works on macOS and Linux)
-bleak>=0.22
+bleak>=0.22,<4
 
 # Gamepad side (Linux / Raspberry Pi only)
 evdev>=1.7 ; sys_platform == "linux"
+
+# Remote Play launcher: drives Chromium over the DevTools Protocol.
+# Linux only in practice, but harmless anywhere.
+websockets>=12

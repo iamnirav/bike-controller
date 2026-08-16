@@ -4,11 +4,14 @@ Deliberately free of any BLE or uinput dependency: this is pure logic over
 numbers, so it can be unit-tested without hardware and reused unchanged if the
 output layer switches from uinput to USB HID gadget mode.
 
-Three mapping modes, independently toggleable:
+Mapping modes, independently toggleable:
 
-  gate     the real controller only passes through while you are pedalling
-  axis     cadence drives an analog axis (throttle, stick, whatever)
-  buttons  cadence thresholds fire discrete button presses
+  movement  the left stick's deflection scales with effort -- THE headline
+            feature and the only one enabled in production
+  sprint    a button is held above an effort threshold (part of movement)
+  gate      the real controller only passes through while you are pedalling
+  axis      cadence drives an analog axis (throttle, stick, whatever)
+  buttons   cadence thresholds fire discrete button presses
 
 The console only reports at ~0.87 Hz, so raw cadence is far too steppy to drive
 an axis directly. CadenceTracker smooths it and, critically, decays toward zero
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import math
 import time
+from typing import Literal
 from dataclasses import dataclass, field
 
 
@@ -32,7 +36,12 @@ class CadenceTracker:
     """
 
     smoothing_per_second: float = 3.0
-    stale_after: float = 2.5
+    # How long without a sample before the feed counts as dead. Sized in MISSED
+    # FRAMES, not seconds: at the deployed 2.56 Hz telemetry rate this is ~4
+    # missed frames. It was 2.5s when telemetry ran at 0.87 Hz (~2 frames); the
+    # poll rate tripled and this did not, leaving the fail-safe far laxer than
+    # designed. If you change --poll-interval, revisit this.
+    stale_after: float = 1.5
     decay_to_zero_over: float = 2.0
 
     _value: float = 0.0
@@ -110,7 +119,6 @@ class AxisConfig:
     enabled: bool = True
     min_rpm: float = 30.0
     max_rpm: float = 90.0
-    invert: bool = False
 
 
 @dataclass
@@ -127,7 +135,7 @@ class MovementConfig:
     """
 
     enabled: bool = False
-    source: str = "power"                  # "power" (watts) or "cadence" (rpm)
+    source: Literal["power", "cadence"] = "power"
     min_value: float = 0.0
     max_value: float = 130.0
     # Minimum scale once above min_value. 0.0 means pure scaling: the game's
@@ -268,8 +276,7 @@ class Mapper:
         if axis.enabled:
             span = max(1e-6, axis.max_rpm - axis.min_rpm)
             fraction = (cadence - axis.min_rpm) / span
-            fraction = min(1.0, max(0.0, fraction))
-            out.axis = 1.0 - fraction if axis.invert else fraction
+            out.axis = min(1.0, max(0.0, fraction))
 
         for rule in self.config.buttons:
             if rule.min_rpm <= cadence < rule.max_rpm:

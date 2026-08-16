@@ -82,9 +82,6 @@ class BikeState:
     def age(self) -> float:
         return time.monotonic() - self.updated_at
 
-    def is_fresh(self, max_age: float = 3.0) -> bool:
-        return self.age <= max_age
-
 
 class IconBike:
     """Polls an Icon console and keeps `state` current.
@@ -119,6 +116,11 @@ class IconBike:
         """Record a link failure and wake any waiting stream()."""
         if self._failure is None:
             self._failure = exc
+        # A full queue is exactly when a waiter most needs waking, so make room
+        # rather than dropping the sentinel. The 10s wait_for in the consumer is
+        # still the real guarantee; this just makes the common case immediate.
+        with contextlib.suppress(asyncio.QueueEmpty):
+            self._updates.get_nowait()
         with contextlib.suppress(asyncio.QueueFull):
             self._updates.put_nowait(None)
 

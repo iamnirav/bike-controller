@@ -19,10 +19,16 @@ rsync -az --delete \
       "$HERE/" "$HOST:$REMOTE/"
 
 echo "==> running tests on the Pi"
-ssh -n "$HOST" "cd $REMOTE && \
-    ./.venv/bin/python tests/test_mapping.py  | tail -1 && \
-    ./.venv/bin/python tests/test_sequence.py | tail -1 && \
-    ./.venv/bin/python tests/test_cues.py     | tail -1"
+# pipefail matters: without it each pipeline's status is tail's, which is always
+# 0, so a red suite would print "21/22 passed" and the deploy would carry on and
+# restart the service anyway. The central invariant here is a safety fail-safe
+# asserted by these tests.
+# Globbing matters too: naming files individually means a new test file is
+# silently never run.
+ssh -n "$HOST" "set -o pipefail; cd $REMOTE && \
+    for t in tests/test_*.py; do \
+        ./.venv/bin/python \"\$t\" | tail -1 || exit 1; \
+    done"
 
 ssh -n "$HOST" "chmod +x $REMOTE/tools/*.sh"
 

@@ -160,13 +160,21 @@ async def drive(page_ws: str, dry_run: bool, timeout: float) -> int:
     async with websockets.connect(page_ws, max_size=None) as ws:
         message_id = 0
 
-        async def send(method: str, params: dict | None = None):
+        async def send(method: str, params: dict | None = None, timeout: float = 20.0):
             nonlocal message_id
             message_id += 1
             await ws.send(json.dumps({"id": message_id, "method": method,
                                       "params": params or {}}))
+            # Bound every request. Without this a stalled CDP connection hangs
+            # here forever, outliving --timeout; the launcher task then never
+            # completes and Launcher.trigger() refuses all further attempts,
+            # disabling the Konami code until the bridge is restarted.
+            deadline = time.monotonic() + timeout
             while True:
-                reply = json.loads(await ws.recv())
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"CDP {method} timed out after {timeout:.0f}s")
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
                 if reply.get("id") == message_id:
                     return reply
 

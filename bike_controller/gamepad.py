@@ -81,9 +81,6 @@ class VirtualGamepad:
         else:
             self.set_axis(code, int(TRIGGER_MIN + fraction * (TRIGGER_MAX - TRIGGER_MIN)))
 
-    # Kept for callers that specifically mean a trigger.
-    set_trigger_normalised = set_axis_normalised
-
     def neutral(self) -> None:
         """Release everything. This is what a closed gate emits."""
         for code in self._buttons:
@@ -251,6 +248,16 @@ class ControllerReader:
             self.buttons[event.code] = 1 if event.value else 0
         elif event.type == e.EV_ABS:
             self.axes[event.code] = self.rescale(event.code, event.value)
+
+    def snapshot(self) -> tuple[dict[int, int], dict[int, int]]:
+        """Copy of the current button/axis state.
+
+        The reader is written by one task and read by another. Iterating the
+        live dicts is only safe while no `await` appears inside the loop -- a
+        landmine for anyone adding one later. These dicts hold under 20 entries,
+        so copying costs nothing at 60 Hz and removes the invariant entirely.
+        """
+        return dict(self.buttons), dict(self.axes)
 
     def close(self) -> None:
         self.rumbler.erase()

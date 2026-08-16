@@ -41,10 +41,13 @@ low cadence, so the 40/25 rpm thresholds do not force you to sprint to move.
 
 **No laptop needed.** The bridge starts on boot, so the routine is:
 
-1. Power on the Pi (the bridge starts itself and waits for the bike)
-2. VNC in with Pi Connect — from a phone, tablet, anything
-3. Open Chromium, go to `xbox.com/remoteplay`
-4. Get on the bike and ride
+1. The Pi stays powered on; the bridge starts at boot and waits for the bike
+2. Get on the bike
+3. Enter the **Konami code** on the controller: ↑ ↑ ↓ ↓ ← → ← → B A
+4. Short buzz = registered. Long buzz = Remote Play is streaming. Ride.
+
+Three short pulses means the launch failed; see
+`/run/user/1000/bike-remoteplay.log`.
 
 The bridge runs as a systemd service on the Pi:
 
@@ -59,7 +62,7 @@ sudo systemctl enable bike-bridge         # optional: start on boot
 Then open `xbox.com/remoteplay` in Chromium on the Pi. Get on the bike and ride.
 
 **Default mapping:** the left stick's **deflection scales with your power output**
-— work harder, move faster. Sprint (left stick click) engages above 125 W. Every
+— work harder, move faster. Sprint (left stick click) engages above 100 W. Every
 other input passes through unconditionally, so menus and actions still work while
 stopped; you just cannot *travel*.
 
@@ -248,12 +251,17 @@ while riding:
 
 | Cue | Meaning |
 |---|---|
-| strong 140 ms | hit full speed |
-| soft 70 ms | dropped below full speed |
-| strong 220 ms, both motors | sprint engaged |
-| soft 60 ms | sprint released |
+| strong 100 ms | hit full speed |
+| strong 200 ms, both motors | sprint engaged |
 
-Edge-triggered, and both underlying flags are **hysteretic** — sprint releases at
+Plus two outside the ride loop, for the launch flow: a **120 ms** ack when the
+Konami code registers, a **700 ms** double-motor buzz when Remote Play is
+confirmed streaming, and three short pulses if it failed.
+
+There are deliberately **no "off" cues**. Buzzing on the way down doubles the
+haptic traffic while telling you nothing your legs have not already told you.
+
+Rising-edge only, and both underlying flags are **hysteretic** — sprint releases at
 92% of its threshold, full speed at 95% — so hovering at a boundary does not
 buzz continuously. Requires `FF_RUMBLE` on the pad (the 8BitDo Ultimate 2 has it,
 with 16 effect slots). Effects are uploaded once and replayed by id; uploading
@@ -302,18 +310,21 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--movement` | `none` | scale the left stick by effort: `power`, `cadence`, or `none` |
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
-| `--poll-interval` | 0.2 | seconds between BLE poll writes; lower = fresher telemetry |
-| `--no-rumble` | off | disable haptic cues on the physical controller |
 | `--movement-floor` | 0.0 | minimum scale once above min; 0 means pure scaling |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
+| `--poll-interval` | 0.2 | seconds between BLE poll writes; lower = fresher telemetry |
+| `--no-rumble` | off | disable haptic cues on the physical controller |
+| `--launch-on-input` | — | command to run on the launch trigger (see below) |
+| `--launch-trigger` | `konami` | `konami` or `any` button press |
+| `--simulate-bike` | off | sweep cadence 0–95 rpm instead of connecting |
+| `--no-controller` | off | bike-driven input only |
+| `--no-grab` | off | share the controller instead of taking it exclusively (debugging) |
+| `--status` | off | print state once a second |
 
 Enabling `--movement` automatically drops `left_stick` from the gate set —
 gating *and* scaling the same stick is just the gate with extra steps.
-| `--simulate-bike` | off | sweep cadence 0–95 rpm instead of connecting |
-| `--no-controller` | off | bike-driven input only |
-| `--status` | off | print state once a second |
 
 `--status` prints `age=` — seconds since the last telemetry frame. Trust that
 over `bike=connected`: a healthy link sits near 1 s, and a climbing age means
@@ -386,8 +397,10 @@ bike_controller/
   bike.py      BLE reader: handshake, poll loop, telemetry decode
   gamepad.py   virtual pad output (uinput) + physical controller input (evdev)
   mapping.py   cadence -> gate/axis/buttons. No BLE or evdev dependency.
-tools/         scan, probe, live readout, controller inspector, gamepad test, bridge
-tests/         mapping tests, including the fail-safe invariant
+  sequence.py  Konami-code matcher (KMP). No BLE or evdev imports either.
+tools/         scan, probe, live readout, controller inspector, gamepad test,
+               bridge, remoteplay (drives Chromium via DevTools Protocol)
+tests/         33 tests: mapping incl. the fail-safe, sequence, haptic cues
 systemd/       service unit
 udev/          rule hiding the physical pad from browsers
 ```
@@ -437,6 +450,42 @@ Neither failure takes the virtual pad down, so the browser never sees the
 gamepad disappear and reconnect.
 
 ---
+
+## Starting Remote Play from the saddle
+
+The Pi is headless next to the bike, so there is no way to click "Click to start
+playing" without VNCing in from another device — and the controller cannot help,
+because the bridge grabs it exclusively.
+
+**Enter the Konami code on the controller** (↑ ↑ ↓ ↓ ← → ← → B A) and the bridge
+runs `tools/start-remoteplay.sh`, which launches Chromium at the console's Remote
+Play URL and drives it via the DevTools Protocol.
+
+Deliberately *not* a boot autostart: the Pi being powered on does not mean anyone
+is riding. It is also self-re-arming — it declines to launch while a browser is
+already running, so the code does nothing mid-session but brings Remote Play back
+if it has died.
+
+Details that took a while to get right:
+
+- **The click is a dispatched input event**, not `element.click()`. A synthetic
+  DOM click is not a trusted user gesture and some browser APIs ignore it.
+- **The button is hit-tested before clicking.** The dialog exists in the DOM
+  *behind* the loading screens, so `display`/`visibility` checks are not enough —
+  it is also hidden by opacity and by overlays. `document.elementFromPoint` at
+  the click coordinates is the decisive test. Without it, the launcher clicked a
+  dormant element, reported success, and left the real dialog untouched.
+- **Success means streaming, not clicking.** It polls for a `<video>` genuinely
+  playing frames, and re-clicks if none appears. Reporting success at the click
+  is what made a stalled page look like a win.
+- **It matches on the button's visible text**, so a Microsoft reword breaks it.
+  It fails loudly with the page title and body text; `--dry-run` shows what it
+  can currently see without clicking.
+- **The bridge runs as root, so the script drops to the desktop user** via
+  `runuser`. As root, `XDG_RUNTIME_DIR` is `/run/user/0`, which does not exist,
+  and the script dies before doing anything.
+
+Log: `/run/user/1000/bike-remoteplay.log`.
 
 ## Working on this
 
@@ -494,18 +543,15 @@ config file. Change thresholds there and deploy.
   or a faster poll rate — try the poll rate first, since a filter costs lag.
 - **Tune the thresholds against real rides.** `--movement-max` and `--sprint-at`
   are calibrated from one capture at low resistance.
-- **Measure the faster poll rate.** The README claims `--interval 0.05` should
-  reach ~2.5 Hz, derived from where the cycle time currently goes (200 ms sleep
-  vs ~30 ms round trip). This has **not** been measured. `tools/live.py` has an
-  Hz counter. Note `bridge.py` does not yet expose `--interval`; only `live.py`
-  does.
+- **A cheap screen or a phone tap** if the Konami launcher ever proves flaky;
+  today it is the only way to start Remote Play without VNC.
 
 ## Install on a fresh Pi
 
 ```bash
 sudo apt-get install -y python3-evdev
 python3 -m venv --system-site-packages .venv
-./.venv/bin/pip install bleak
+./.venv/bin/pip install bleak websockets
 
 echo -e "uinput\njoydev" | sudo tee /etc/modules-load.d/bike-controller.conf
 sudo modprobe uinput joydev

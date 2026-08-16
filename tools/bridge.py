@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import contextlib
 import math
 import os
@@ -48,6 +49,38 @@ from bike_controller.mapping import (                                # noqa: E40
 )
 
 LEFT_STICK = (e.ABS_X, e.ABS_Y)
+
+
+@dataclasses.dataclass
+class Status:
+    """Shared state, written by the feed tasks and read by status_loop.
+
+    Typed rather than a dict of bare strings: the previous version accumulated a
+    `resistance` key that was written and never read, and every reader repeated
+    a default that duplicated the real one.
+    """
+
+    bike: str = "-"
+    bike_seen: float | None = None      # monotonic time of the last telemetry frame
+    controller: str = "none"
+    cadence_raw: int = 0
+    cadence: float = 0.0
+    power: float = 0.0
+    axis: float = 0.0
+    gate: bool = False
+    move: float = 1.0
+    sprint: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class Wiring:
+    """Everything output_loop needs that never changes after startup."""
+
+    axis_code: int | None
+    sprint_code: int | None
+    gated_axes: frozenset
+    gated_buttons: frozenset
+    rumble: bool
 
 
 # Up Up Down Down Left Right Left Right B A. The d-pad is a hat axis, which is
@@ -95,9 +128,14 @@ class Launcher:
     def enabled(self) -> bool:
         return bool(self.command)
 
-    @staticmethod
-    def _browser_running() -> bool:
-        return subprocess.run(["pgrep", "-x", "chromium"],
+    # Debian ships `chromium`; other distros ship `chromium-browser`, and
+    # remoteplay.py accepts either. All three checks must agree, or the launcher
+    # decides no browser is running and relaunches on every trigger.
+    BROWSER_PATTERN = "chromium|chromium-browser"
+
+    @classmethod
+    def _browser_running(cls) -> bool:
+        return subprocess.run(["pgrep", "-x", cls.BROWSER_PATTERN],
                               capture_output=True).returncode == 0
 
     async def _run(self) -> None:
@@ -105,16 +143,27 @@ class Launcher:
         # Immediate acknowledgement: the launch takes tens of seconds, and
         # without this you cannot tell whether the code registered.
         self.rumble("ack")
-        proc = await asyncio.create_subprocess_exec(
-            *self.command, stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        if proc.returncode == 0:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self.command, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            returncode = await proc.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            # A missing or non-executable script would otherwise raise into a
+            # task nothing awaits: no log, no buzz, and the rider on the bike
+            # has no way to tell the difference from a slow launch.
+            print(f"  launcher could not start: {type(exc).__name__}: {exc}",
+                  flush=True)
+            returncode = -1
+
+        if returncode == 0:
             print("  remote play connected", flush=True)
             self.rumble("ok")
         else:
-            print(f"  remote play FAILED (exit {proc.returncode})", flush=True)
+            print(f"  remote play FAILED (exit {returncode})", flush=True)
             # Three short pulses -- unmistakably different from the long success
             # buzz, and readable without looking at anything.
             for _ in range(3):
@@ -160,13 +209,15 @@ GATE_TARGETS: dict[str, tuple[set[int], set[int]]] = {
     "dpad": ({e.ABS_HAT0X, e.ABS_HAT0Y}, set()),
     "face_buttons": (set(), {e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y}),
     "shoulders": (set(), {e.BTN_TL, e.BTN_TR}),
-    "all": (
-        {e.ABS_X, e.ABS_Y, e.ABS_RX, e.ABS_RY, e.ABS_Z, e.ABS_RZ,
-         e.ABS_HAT0X, e.ABS_HAT0Y},
-        {e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y, e.BTN_TL, e.BTN_TR,
-         e.BTN_SELECT, e.BTN_START, e.BTN_THUMBL, e.BTN_THUMBR},
-    ),
 }
+
+# Derived, not hand-written: adding a group above must not silently stop "all"
+# meaning all. The extras are buttons no named group covers.
+GATE_TARGETS["all"] = (
+    {code for axes, _ in GATE_TARGETS.values() for code in axes},
+    {code for _, buttons in GATE_TARGETS.values() for code in buttons}
+    | {e.BTN_SELECT, e.BTN_START, e.BTN_THUMBL, e.BTN_THUMBR},
+)
 
 
 def resolve_gate_targets(names: list[str]) -> tuple[set[int], set[int]]:
@@ -189,7 +240,7 @@ def parse_button(spec: str) -> ButtonRule:
     return ButtonRule(name=name, min_rpm=float(rpm))
 
 
-async def feed_from_bike(address: str | None, mapper: Mapper, state: dict,
+async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                          poll_interval: float = 0.2) -> None:
     """Keep a bike link alive, reconnecting indefinitely.
 
@@ -204,13 +255,13 @@ async def feed_from_bike(address: str | None, mapper: Mapper, state: dict,
         try:
             target = address or await IconBike.discover()
             if target is None:
-                state["bike"] = "searching"
+                status.bike = "searching"
                 await asyncio.sleep(backoff)
                 continue
 
-            state["bike"] = "connecting"
+            status.bike = "connecting"
             async with IconBike(target, poll_interval=poll_interval) as bike:
-                state["bike"] = "connected"
+                status.bike = "connected"
                 backoff = 3.0
                 stream = bike.stream()
                 while True:
@@ -219,23 +270,22 @@ async def feed_from_bike(address: str | None, mapper: Mapper, state: dict,
                     # error path, so bound the wait explicitly. Telemetry
                     # arrives at ~0.87 Hz; 10s is ~9 missed frames.
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
-                    state["cadence_raw"] = sample.cadence_rpm
-                    state["resistance"] = sample.resistance
-                    state["bike_seen"] = time.monotonic()
+                    status.cadence_raw = sample.cadence_rpm
+                    status.bike_seen = time.monotonic()
                     mapper.submit(sample.cadence_rpm, sample.power_w)
         except asyncio.CancelledError:
             raise
         except (Exception, StopAsyncIteration) as exc:             # noqa: BLE001
-            state["bike"] = "retrying"
+            status.bike = "retrying"
             print(f"  bike link down ({type(exc).__name__}: {exc}); "
                   f"retrying in {backoff:.0f}s", flush=True)
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 1.5)
 
 
-async def feed_simulated(mapper: Mapper, state: dict) -> None:
+async def feed_simulated(mapper: Mapper, status: Status) -> None:
     """A slow cadence sweep, so gate/axis behaviour is visible in a browser."""
-    state["bike"] = "simulated"
+    status.bike = "simulated"
     start = time.monotonic()
     while True:
         phase = (time.monotonic() - start) / 20.0
@@ -243,13 +293,13 @@ async def feed_simulated(mapper: Mapper, state: dict) -> None:
         # Mirror the console's own estimate at zero resistance, which we
         # measured as watts = 2 * (cadence - 25).
         power = max(0.0, 2.0 * (cadence - 25.0))
-        state["cadence_raw"] = round(cadence)
+        status.cadence_raw = round(cadence)
         mapper.submit(cadence, power)
         await asyncio.sleep(1.0)          # match the real console's ~1 Hz rate
 
 
 async def feed_from_controller(
-    holder: dict, state: dict, path_arg: str | None, grab: bool,
+    holder: dict, status: Status, path_arg: str | None, grab: bool,
     launcher: "Launcher | None" = None,
     detector: SequenceDetector | None = None,
 ) -> None:
@@ -264,13 +314,13 @@ async def feed_from_controller(
         try:
             path = path_arg or ControllerReader.find()
             if path is None:
-                state["controller"] = "none"
+                status.controller = "none"
                 await asyncio.sleep(3.0)
                 continue
 
             reader = ControllerReader(path, grab=grab)
             holder["reader"] = reader
-            state["controller"] = reader.device.name
+            status.controller = reader.device.name
             print(f"  controller acquired: {reader.device.name} at {path}"
                   f" ({'grabbed' if reader.grabbed else 'shared'},"
                   f" haptics {'yes' if reader.rumbler.available else 'no'})", flush=True)
@@ -301,7 +351,7 @@ async def feed_from_controller(
             holder["reader"] = None
             if reader is not None:
                 reader.close()
-            state["controller"] = "none"
+            status.controller = "none"
             print(f"  controller lost ({type(exc).__name__}: {exc}); "
                   f"re-acquiring", flush=True)
             await asyncio.sleep(2.0)
@@ -311,13 +361,9 @@ async def output_loop(
     pad: VirtualGamepad,
     mapper: Mapper,
     holder: dict,
-    axis_code: int | None,
-    sprint_code: int | None,
-    gated_axes: set[int],
-    gated_buttons: set[int],
-    state: dict,
+    wiring: Wiring,
+    status: Status,
     stop: asyncio.Event,
-    rumble: bool = True,
 ) -> None:
     period = 1.0 / FRAME_RATE
     # Haptics are edge-triggered: fire on the transition, not every frame.
@@ -327,15 +373,15 @@ async def output_loop(
     prev_sprint = False
     while not stop.is_set():
         out = mapper.evaluate()
-        state["gate"] = out.gate_open
-        state["cadence"] = out.cadence
-        state["axis"] = out.axis
-        state["move"] = out.movement_scale
-        state["sprint"] = out.sprint
+        status.gate = out.gate_open
+        status.cadence = out.cadence
+        status.axis = out.axis
+        status.move = out.movement_scale
+        status.sprint = out.sprint
         # Take power from the same evaluate() that produced `move`, not from the
         # feed task -- otherwise the two can be a sample apart and the status
         # line implies a relationship between them that isn't real.
-        state["power"] = out.power
+        status.power = out.power
 
         # Everything starts neutral, so anything we skip below stays released
         # (and sticks stay centred, since 0 is centre for a signed axis).
@@ -343,16 +389,14 @@ async def output_loop(
 
         reader = holder.get("reader")
         if reader is not None:
-            # NOTE: feed_from_controller mutates these dicts from another task.
-            # Iterating them is only safe because there is no await inside these
-            # loops. Adding one gives "dictionary changed size during iteration".
+            buttons, axes = reader.snapshot()
             blocked = not out.gate_open
-            for code, value in reader.buttons.items():
-                if blocked and code in gated_buttons:
+            for code, value in buttons.items():
+                if blocked and code in wiring.gated_buttons:
                     continue
                 pad.set_button(code, bool(value))
-            for code, value in reader.axes.items():
-                if blocked and code in gated_axes:
+            for code, value in axes.items():
+                if blocked and code in wiring.gated_axes:
                     continue
                 if code in LEFT_STICK:
                     # Uniform scalar on both components: magnitude scales,
@@ -361,14 +405,14 @@ async def output_loop(
                 pad.set_axis(code, value)
 
         # Bike-driven output always applies.
-        if axis_code is not None and mapper.config.axis.enabled:
-            pad.set_axis_normalised(axis_code, out.axis)
+        if wiring.axis_code is not None and mapper.config.axis.enabled:
+            pad.set_axis_normalised(wiring.axis_code, out.axis)
         for name in out.buttons:
             pad.set_button(getattr(e, name), True)
-        if out.sprint and sprint_code is not None:
-            pad.set_button(sprint_code, True)
+        if out.sprint and wiring.sprint_code is not None:
+            pad.set_button(wiring.sprint_code, True)
 
-        if rumble and reader is not None and reader.rumbler.available:
+        if wiring.rumble and reader is not None and reader.rumbler.available:
             # Rising edges only. The hysteresis in mapping.py matters more here
             # than it did with paired on/off cues: without it, effort hovering
             # at a threshold would re-fire the SAME cue over and over.
@@ -382,55 +426,38 @@ async def output_loop(
         await asyncio.sleep(period)
 
 
-async def status_loop(state: dict, stop: asyncio.Event) -> None:
+async def status_loop(status: Status, stop: asyncio.Event) -> None:
     while not stop.is_set():
         await asyncio.sleep(1.0)
-        seen = state.get("bike_seen")
-        age = f"{time.monotonic() - seen:4.1f}s" if seen else "  -- "
+        age = (f"{time.monotonic() - status.bike_seen:4.1f}s"
+               if status.bike_seen else "  -- ")
         print(
-            f"  bike={state.get('bike','-'):<10} age={age} "
-            f"ctrl={state.get('controller','none')[:22]:<22} "
-            f"cadence={state.get('cadence',0):5.1f} "
-            f"(raw {state.get('cadence_raw',0):>3}) "
-            f"gate={'OPEN' if state.get('gate') else 'shut'} "
-            f"pwr={state.get('power',0):4.0f} "
-            f"move={state.get('move',0):4.2f}"
-            f"{' SPRINT' if state.get('sprint') else ''}",
+            f"  bike={status.bike:<10} age={age} "
+            f"ctrl={status.controller[:22]:<22} "
+            f"cadence={status.cadence:5.1f} (raw {status.cadence_raw:>3}) "
+            f"gate={'OPEN' if status.gate else 'shut'} "
+            f"pwr={status.power:4.0f} move={status.move:4.2f}"
+            f"{' SPRINT' if status.sprint else ''}",
             flush=True,
         )
 
 
-async def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+
     parser.add_argument("--address", help="bike BLE address")
     parser.add_argument("--simulate-bike", action="store_true")
+    parser.add_argument("--poll-interval", type=float, default=0.2,
+                        help="seconds between BLE poll writes (default 0.2). "
+                             "Lower means fresher telemetry; see README for the "
+                             "measured trade-off.")
+
     parser.add_argument("--controller", help="evdev path; default is autodetect")
     parser.add_argument("--no-controller", action="store_true")
     parser.add_argument("--no-grab", action="store_true",
                         help="do not take the controller exclusively (debugging only)")
     parser.add_argument("--status", action="store_true", help="print state once a second")
 
-    parser.add_argument("--no-gate", action="store_true")
-    parser.add_argument(
-        "--gate-inputs", default="left_stick",
-        help="comma-separated groups the gate suppresses: "
-             + ", ".join(GATE_TARGETS) + " (default: left_stick)",
-    )
-    parser.add_argument("--gate-open", type=float, default=40.0)
-    parser.add_argument("--gate-close", type=float, default=25.0)
-    parser.add_argument("--gate-grace", type=float, default=1.5)
-
-    parser.add_argument("--no-axis", action="store_true",
-                        help="(deprecated; --axis none is the default)")
-    parser.add_argument("--axis", choices=sorted(AXIS_CHOICES), default="none",
-                        help="axis driven by cadence (default: none)")
-    parser.add_argument("--axis-min", type=float, default=30.0)
-    parser.add_argument("--axis-max", type=float, default=90.0)
-
-    parser.add_argument("--poll-interval", type=float, default=0.2,
-                        help="seconds between BLE poll writes (default 0.2). "
-                             "Lower means fresher telemetry; see README for the "
-                             "measured trade-off.")
     parser.add_argument("--movement", choices=["none", "power", "cadence"],
                         default="none",
                         help="scale the left stick by effort (default: none)")
@@ -443,6 +470,29 @@ async def main() -> int:
                         help="minimum scale once above --movement-min (0 = pure scaling)")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")
+    parser.add_argument("--sprint-button", default="BTN_THUMBL",
+                        help="button held when sprinting (default BTN_THUMBL, "
+                             "i.e. left stick click)")
+
+    parser.add_argument("--no-gate", action="store_true")
+    parser.add_argument(
+        "--gate-inputs", default="left_stick",
+        help="comma-separated groups the gate suppresses: "
+             + ", ".join(GATE_TARGETS) + " (default: left_stick)",
+    )
+    parser.add_argument("--gate-open", type=float, default=40.0)
+    parser.add_argument("--gate-close", type=float, default=25.0)
+    parser.add_argument("--gate-grace", type=float, default=1.5)
+
+    parser.add_argument("--axis", choices=sorted(AXIS_CHOICES), default="none",
+                        help="axis driven by cadence (default: none)")
+    parser.add_argument("--axis-min", type=float, default=30.0)
+    parser.add_argument("--axis-max", type=float, default=90.0)
+    parser.add_argument("--button", action="append", type=parse_button, default=[],
+                        help="RPM:BUTTON, repeatable (e.g. --button 80:BTN_TR)")
+
+    parser.add_argument("--no-rumble", action="store_true",
+                        help="disable haptic cues on the physical controller")
     parser.add_argument("--launch-on-input", metavar="CMD", default=None,
                         help="run CMD on the launch trigger, when no browser is "
                              "running (e.g. tools/start-remoteplay.sh)")
@@ -450,31 +500,26 @@ async def main() -> int:
                         default="konami",
                         help="konami: up up down down left right left right B A; "
                              "any: any button press (default: konami)")
-    parser.add_argument("--no-rumble", action="store_true",
-                        help="disable haptic cues on the physical controller")
-    parser.add_argument("--sprint-button", default="BTN_THUMBL",
-                        help="button held when sprinting (default BTN_THUMBL, "
-                             "i.e. left stick click)")
+    return parser
 
-    parser.add_argument("--button", action="append", type=parse_button, default=[],
-                        help="RPM:BUTTON, repeatable (e.g. --button 80:BTN_TR)")
-    args = parser.parse_args()
 
-    sys.stdout.reconfigure(line_buffering=True)
+@dataclasses.dataclass(frozen=True)
+class Settings:
+    config: MappingConfig
+    wiring: Wiring
+    gate_groups: list        # resolved names, for display
 
+
+def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
+    """Validate arguments and assemble the runtime configuration."""
     if args.simulate_bike and args.address:
         parser.error("--simulate-bike and --address are mutually exclusive")
-
     if args.gate_open < args.gate_close:
         parser.error(f"--gate-open ({args.gate_open}) must be >= --gate-close "
                      f"({args.gate_close}); inverted thresholds make the gate chatter")
     if args.axis_max <= args.axis_min:
-        parser.error(f"--axis-max ({args.axis_max}) must exceed --axis-min ({args.axis_min})")
-
-    axis_code = AXIS_CHOICES[args.axis]
-    if args.no_axis:
-        axis_code = None
-
+        parser.error(f"--axis-max ({args.axis_max}) must exceed "
+                     f"--axis-min ({args.axis_min})")
     if args.movement_max <= args.movement_min:
         parser.error(f"--movement-max ({args.movement_max}) must exceed "
                      f"--movement-min ({args.movement_min})")
@@ -482,7 +527,6 @@ async def main() -> int:
         parser.error("--movement-floor must be in [0.0, 1.0)")
     if not hasattr(e, args.sprint_button):
         parser.error(f"unknown --sprint-button {args.sprint_button!r}")
-    sprint_code = getattr(e, args.sprint_button) if args.sprint_at is not None else None
 
     movement = MovementConfig(
         enabled=args.movement != "none",
@@ -493,45 +537,109 @@ async def main() -> int:
         sprint_at=args.sprint_at,
     )
 
+    groups = [n.strip() for n in args.gate_inputs.split(",") if n.strip()]
     # Scaling supersedes gating for the left stick -- applying both would zero
     # it below the gate threshold AND scale it above, which is just the gate
-    # with extra steps.
-    if movement.enabled and "left_stick" in args.gate_inputs:
-        args.gate_inputs = ",".join(
-            n for n in args.gate_inputs.split(",") if n.strip() != "left_stick"
-        )
+    # with extra steps. Done on the parsed list, before resolving: an earlier
+    # version edited the display string afterwards, so the note printed while
+    # the stick stayed gated.
+    if movement.enabled and "left_stick" in groups:
+        groups.remove("left_stick")
         print("Note: --movement is on, so left_stick is no longer gated "
               "(scaling handles it).")
 
-    # Resolve AFTER the left_stick removal above, or the removal would only
-    # affect the printed string while the stick stayed gated and scaled.
     try:
-        gated_axes, gated_buttons = resolve_gate_targets(
-            [n.strip() for n in args.gate_inputs.split(",") if n.strip()]
-        )
+        gated_axes, gated_buttons = resolve_gate_targets(groups)
     except KeyError as exc:
         parser.error(f"unknown --gate-inputs group {exc}; "
                      f"choose from {', '.join(GATE_TARGETS)}")
 
-    config = MappingConfig(
-        gate=GateConfig(
-            enabled=not args.no_gate,
-            open_rpm=args.gate_open,
-            close_rpm=args.gate_close,
-            grace_seconds=args.gate_grace,
+    axis_code = AXIS_CHOICES[args.axis]
+    return Settings(
+        config=MappingConfig(
+            gate=GateConfig(
+                enabled=not args.no_gate,
+                open_rpm=args.gate_open,
+                close_rpm=args.gate_close,
+                grace_seconds=args.gate_grace,
+            ),
+            axis=AxisConfig(
+                enabled=axis_code is not None,
+                min_rpm=args.axis_min,
+                max_rpm=args.axis_max,
+            ),
+            movement=movement,
+            buttons=args.button,
         ),
-        axis=AxisConfig(
-            enabled=axis_code is not None,
-            min_rpm=args.axis_min,
-            max_rpm=args.axis_max,
+        wiring=Wiring(
+            axis_code=axis_code,
+            sprint_code=(getattr(e, args.sprint_button)
+                         if args.sprint_at is not None else None),
+            gated_axes=frozenset(gated_axes),
+            gated_buttons=frozenset(gated_buttons),
+            rumble=not args.no_rumble,
         ),
-        movement=movement,
-        buttons=args.button,
+        gate_groups=groups,
     )
-    mapper = Mapper(config)
-    state: dict = {}
 
+
+def print_banner(args, settings: Settings, launcher: "Launcher",
+                 detector, pad: VirtualGamepad) -> None:
+    """Startup summary.
+
+    deploy.sh greps journalctl for these exact lines as its post-restart smoke
+    check, so this is a verification surface, not decoration. Each feature gets
+    its own if/else: a previous version chained them and reported "Movement
+    scaling: off" based on whether a LAUNCH COMMAND was configured.
+    """
+    config, wiring = settings.config, settings.wiring
+    print(f"Virtual pad created: {pad.ui.device.path}")
+
+    if config.gate.enabled and (wiring.gated_axes or wiring.gated_buttons):
+        print(f"Gating: {','.join(settings.gate_groups)} "
+              f"(open >{config.gate.open_rpm:.0f} rpm, "
+              f"close <{config.gate.close_rpm:.0f} rpm, "
+              f"grace {config.gate.grace_seconds:.1f}s)")
+    else:
+        print("Gating: none")
+
+    movement = config.movement
+    if movement.enabled:
+        floor = f", floor {movement.floor:.2f}" if movement.floor else ""
+        print(f"Movement: left stick scaled by {movement.source} "
+              f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
+    else:
+        print("Movement: off")
+
+    if movement.sprint_at is not None:
+        print(f"Sprint: {args.sprint_button} at/above {movement.sprint_at:.0f} "
+              f"{movement.source} (releases below "
+              f"{movement.sprint_at * movement.sprint_release_ratio:.0f})")
+    else:
+        print("Sprint: off")
+
+    print(f"Cadence axis: {args.axis}")
+    print(f"Haptics: {'on' if wiring.rumble else 'off'}")
+
+    if launcher.enabled:
+        trigger = ("Konami code (up up down down left right left right B A)"
+                   if detector else "any button press")
+        print(f"Launch trigger: {trigger}")
+        print(f"  runs: {args.launch_on_input} (only when no browser is running)")
+    else:
+        print("Launch trigger: none")
+
+
+async def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
+
+    settings = build_settings(args, parser)
+    mapper = Mapper(settings.config)
+    status = Status()
     holder: dict = {"reader": None}
+
     def rumble(name: str) -> None:
         reader = holder.get("reader")
         if reader is not None and reader.rumbler.available:
@@ -569,50 +677,21 @@ async def main() -> int:
             stop.set()
 
     with VirtualGamepad() as pad:
-        print(f"Virtual pad created: {pad.ui.device.path}")
-        if config.gate.enabled and (gated_axes or gated_buttons):
-            print(f"Gating: {args.gate_inputs} "
-                  f"(open >{config.gate.open_rpm:.0f} rpm, "
-                  f"close <{config.gate.close_rpm:.0f} rpm, "
-                  f"grace {config.gate.grace_seconds:.1f}s)")
-        else:
-            print("Gating: none")
-        print(f"Cadence axis: {args.axis}")
-        if movement.enabled:
-            floor = f", floor {movement.floor:.2f}" if movement.floor else ""
-            print(f"Movement: left stick scaled by {movement.source} "
-                  f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
-            if movement.sprint_at is not None:
-                print(f"Sprint: {args.sprint_button} at/above "
-                      f"{movement.sprint_at:.0f} {movement.source} "
-                      f"(releases below {movement.sprint_at * movement.sprint_release_ratio:.0f})")
-            print(f"Haptics: {'off' if args.no_rumble else 'on'}")
-        if launcher.enabled:
-            trigger = ("Konami code (up up down down left right left right B A)"
-                       if detector else "any button press")
-            print(f"Launch trigger: {trigger}")
-            print(f"  runs: {args.launch_on_input} (only when no browser is running)")
-        else:
-            print("Movement scaling: off")
-        tasks = [
-            asyncio.create_task(
-                output_loop(pad, mapper, holder, axis_code, sprint_code,
-                            gated_axes, gated_buttons, state, stop,
-                            rumble=not args.no_rumble)
-            )
-        ]
+        print_banner(args, settings, launcher, detector, pad)
+
+        tasks = [asyncio.create_task(
+            output_loop(pad, mapper, holder, settings.wiring, status, stop))]
         if args.simulate_bike:
-            tasks.append(asyncio.create_task(feed_simulated(mapper, state)))
+            tasks.append(asyncio.create_task(feed_simulated(mapper, status)))
         else:
             tasks.append(asyncio.create_task(
-                feed_from_bike(args.address, mapper, state, args.poll_interval)))
+                feed_from_bike(args.address, mapper, status, args.poll_interval)))
         if not args.no_controller:
             tasks.append(asyncio.create_task(
-                feed_from_controller(holder, state, args.controller,
-                                     not args.no_grab, launcher, detector)
-            ))
+                feed_from_controller(holder, status, args.controller,
+                                     not args.no_grab, launcher, detector)))
         if args.status:
-            tasks.append(asyncio.create_task(status_loop(state, stop)))
+            tasks.append(asyncio.create_task(status_loop(status, stop)))
 
         for task in tasks:
             task.add_done_callback(on_task_done)

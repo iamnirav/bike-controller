@@ -24,7 +24,12 @@ from bike_controller.mapping import (      # noqa: E402
     MovementConfig,
 )
 
-TELEMETRY_HZ = 0.87          # what the real console actually delivers
+# 0.87 Hz was the original poll rate; the deployed rate is now 2.56 Hz. Tests
+# default to the SLOWER one because it is the harder case for the fail-safe, but
+# the deployed rate is exercised explicitly below -- a fail-safe sized in missed
+# frames behaves differently when the frame rate triples.
+TELEMETRY_HZ = 0.87
+DEPLOYED_HZ = 2.56
 FRAME_HZ = 60.0              # what the bridge's output loop runs at
 
 
@@ -38,14 +43,15 @@ def make_mapper(**gate_kw) -> Mapper:
 
 
 def run(mapper: Mapper, cadence, seconds: float, t0: float = 0.0,
-        frame_hz: float = FRAME_HZ, feed: bool = True):
+        frame_hz: float = FRAME_HZ, feed: bool = True,
+        telemetry_hz: float = TELEMETRY_HZ):
     """Drive the mapper for `seconds`, submitting telemetry at the real rate.
 
     `cadence` may be a constant or a callable of elapsed time. `feed=False`
     simulates a dead link: frames keep being evaluated, no samples arrive.
     """
     step = 1.0 / frame_hz
-    sample_every = 1.0 / TELEMETRY_HZ
+    sample_every = 1.0 / telemetry_hz
     next_sample = 0.0
     elapsed = 0.0
     out = None
@@ -132,6 +138,28 @@ def test_dead_link_closes_within_the_stale_window():
     assert elapsed <= stale_after + 0.5, (
         f"took {elapsed:.2f}s to close; grace should be bypassed when stale"
     )
+
+
+def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
+    """The fail-safe is sized in missed frames, so re-check at the real rate."""
+    mapper = make_mapper()
+    _, t = run(mapper, 85.0, seconds=8.0, telemetry_hz=DEPLOYED_HZ)
+    assert mapper.evaluate(now=t).gate_open is True
+
+    out, _ = run(mapper, None, seconds=8.0, t0=t, feed=False,
+                 telemetry_hz=DEPLOYED_HZ)
+    assert out.gate_open is False, "dead feed left the gate OPEN at 2.56 Hz"
+    assert out.cadence == 0.0
+
+
+def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
+    movement = MovementConfig(enabled=True, source="power",
+                              min_value=0.0, max_value=75.0)
+    mapper = Mapper(MappingConfig(movement=movement))
+    mapper.submit(80.0, 120.0, now=1.0)
+    assert mapper.evaluate(now=1.0).movement_scale == 1.0
+    stale = 1.0 + mapper.tracker.stale_after + 0.1
+    assert mapper.evaluate(now=stale).movement_scale == 0.0
 
 
 def test_stale_decay_is_framerate_independent():
@@ -298,17 +326,5 @@ def test_gate_disabled_always_passes():
 
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failed = 0
-    for fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except AssertionError as exc:
-            failed += 1
-            print(f"  FAIL  {fn.__name__}: {exc}")
-        except Exception as exc:            # a broken test must report, not abort
-            failed += 1
-            print(f"  ERROR {fn.__name__}: {type(exc).__name__}: {exc}")
-    print(f"\n{len(tests) - failed}/{len(tests)} passed")
-    sys.exit(1 if failed else 0)
+    from _runner import main          # noqa: E402 - script-mode only
+    main(globals())
