@@ -89,6 +89,11 @@ class ControllerHolder:
         if self.can_rumble:
             self.reader.rumbler.play(name)
 
+    def rumble_raw(self, strong: int, weak: int) -> None:
+        """Forward the game's own rumble, at its own magnitudes."""
+        if self.can_rumble:
+            self.reader.rumbler.passthrough(strong, weak)
+
     @property
     def can_rumble(self) -> bool:
         return self.reader is not None and self.reader.rumbler.available
@@ -475,6 +480,12 @@ async def output_loop(
                 reader.rumbler.play("sprint_on")
         prev_max, prev_sprint = out.at_max, out.sprint
 
+        # Serviced every frame: an unanswered FF upload leaves the BROWSER
+        # blocked in its ioctl, so this is not optional once the pad advertises
+        # force feedback.
+        for strong, weak in pad.poll_rumble():
+            holder.rumble_raw(strong, weak)
+
         pad.sync()
         # Pinged from HERE, not from a timer: the point is to attest that frames
         # are still being emitted. A ping from anywhere else would keep systemd
@@ -554,6 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--no-rumble", action="store_true",
                         help="disable haptic cues on the physical controller")
+    parser.add_argument("--rumble-passthrough", action="store_true",
+                        help="advertise force feedback on the virtual pad and "
+                             "forward the game's rumble to your controller")
     parser.add_argument("--launch-on-input", metavar="CMD", default=None,
                         help="run CMD on the launch trigger, when no browser is "
                              "running (e.g. tools/start-remoteplay.sh)")
@@ -667,7 +681,9 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     config, wiring = settings.config, settings.wiring
     for note in settings.notes:
         print(note)
-    print(f"Virtual pad created: {pad.ui.device.path}")
+    print(f"Virtual pad created: {pad.path}")
+    print(f"Rumble passthrough: "
+          f"{'on' if pad.has_force_feedback else 'off'}")
 
     if config.gate.enabled and (wiring.gated_axes or wiring.gated_buttons):
         print(f"Gating: {','.join(settings.gate_groups)} "
@@ -753,7 +769,7 @@ async def main() -> int:
             print(f"  FATAL: {type(exc).__name__}: {exc}", flush=True)
             stop.set()
 
-    with VirtualGamepad() as pad:
+    with VirtualGamepad(force_feedback=args.rumble_passthrough) as pad:
         print_banner(args, settings, launcher, detector, pad, mapper)
 
         tasks = [asyncio.create_task(

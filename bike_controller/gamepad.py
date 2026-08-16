@@ -9,8 +9,11 @@ working in Chromium on a Pi 5 -- see README.md.
 from __future__ import annotations
 
 import contextlib
+import time
 
 from evdev import AbsInfo, InputDevice, UInput, ecodes as e, ff, list_devices
+
+from .uinput_ff import FFUInput
 
 VENDOR, PRODUCT, VERSION = 0x045E, 0x028E, 0x0110
 DEVICE_NAME = "Microsoft X-Box 360 pad"
@@ -45,17 +48,58 @@ CENTERED_AXES = {e.ABS_X, e.ABS_Y, e.ABS_RX, e.ABS_RY}
 class VirtualGamepad:
     """A uinput gamepad. Set values, then call sync() once per frame."""
 
-    def __init__(self) -> None:
-        self.ui = UInput(
-            CAPABILITIES,
-            name=DEVICE_NAME,
-            vendor=VENDOR,
-            product=PRODUCT,
-            version=VERSION,
-            bustype=e.BUS_USB,
-        )
+    def __init__(self, force_feedback: bool = False) -> None:
+        self.ui = None
+        self.ff: FFUInput | None = None
+        self.path = "?"
+
+        if force_feedback:
+            # python-evdev cannot build an FF-capable uinput device, so this
+            # path is hand-rolled over ctypes. If anything about it fails we
+            # fall back rather than take the bridge down: rumble passthrough is
+            # a luxury, a working gamepad is not.
+            try:
+                self.ff = FFUInput(DEVICE_NAME, VENDOR, PRODUCT, VERSION,
+                                   e.BUS_USB, BUTTONS, list(AXES.items()))
+                self.path = self._find_path() or "(ff uinput)"
+            except Exception as exc:                   # noqa: BLE001
+                print(f"  rumble passthrough unavailable ({type(exc).__name__}: "
+                      f"{exc}); falling back to a plain virtual pad")
+                self.ff = None
+
+        if self.ff is None:
+            self.ui = UInput(
+                CAPABILITIES,
+                name=DEVICE_NAME,
+                vendor=VENDOR,
+                product=PRODUCT,
+                version=VERSION,
+                bustype=e.BUS_USB,
+            )
+            self.path = self.ui.device.path
         self._buttons: dict[int, int] = {code: 0 for code in BUTTONS}
         self._axes: dict[int, int] = {code: 0 for code in AXES}
+
+    @staticmethod
+    def _find_path() -> str | None:
+        time.sleep(0.3)                       # let udev create the node
+        for path in sorted(list_devices()):
+            with contextlib.suppress(Exception):
+                if InputDevice(path).name == DEVICE_NAME:
+                    return path
+        return None
+
+    @property
+    def has_force_feedback(self) -> bool:
+        return self.ff is not None
+
+    def poll_rumble(self) -> list[tuple[int, int]]:
+        """Rumble the game wants played, as (strong, weak) magnitudes.
+
+        Must be called regularly: an unanswered upload request leaves the
+        *browser* blocked in its ioctl, not just silent.
+        """
+        return self.ff.poll() if self.ff is not None else []
 
     def set_button(self, code: int, pressed: bool) -> None:
         if code in self._buttons:
@@ -89,18 +133,19 @@ class VirtualGamepad:
             self._axes[code] = 0
 
     def sync(self) -> None:
+        writer = self.ff if self.ff is not None else self.ui
         for code, value in self._buttons.items():
-            self.ui.write(e.EV_KEY, code, value)
+            writer.write(e.EV_KEY, code, value)
         for code, value in self._axes.items():
-            self.ui.write(e.EV_ABS, code, value)
-        self.ui.syn()
+            writer.write(e.EV_ABS, code, value)
+        writer.syn()
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
             self.neutral()
             self.sync()
         with contextlib.suppress(Exception):
-            self.ui.close()
+            (self.ff or self.ui).close()
 
     def __enter__(self) -> "VirtualGamepad":
         return self
@@ -136,6 +181,7 @@ class Rumbler:
         self.device = device
         self.available = False
         self._ids: dict[str, int] = {}
+        self._passthrough_id = -1           # -1 asks the kernel for a new slot
         if e.FF_RUMBLE not in device.capabilities().get(e.EV_FF, []):
             return
         try:
@@ -162,6 +208,27 @@ class Rumbler:
         try:
             self.device.write(e.EV_FF, effect_id, 1)
         except Exception:                       # noqa: BLE001 - unplugged mid-pulse
+            self.available = False
+
+    def passthrough(self, strong: int, weak: int, duration_ms: int = 250) -> None:
+        """Play arbitrary magnitudes, for forwarding the game's own rumble.
+
+        Reuses one effect slot, updated in place: uploading a fresh effect per
+        rumble would exhaust the pad's 16 slots within seconds of gameplay.
+        """
+        if not self.available:
+            return
+        try:
+            effect = ff.Effect(
+                e.FF_RUMBLE, self._passthrough_id, 0,
+                ff.Trigger(0, 0), ff.Replay(duration_ms, 0),
+                ff.EffectType(ff_rumble_effect=ff.Rumble(
+                    strong_magnitude=max(0, min(0xFFFF, strong)),
+                    weak_magnitude=max(0, min(0xFFFF, weak)))),
+            )
+            self._passthrough_id = self.device.upload_effect(effect)
+            self.device.write(e.EV_FF, self._passthrough_id, 1)
+        except Exception:                       # noqa: BLE001 - haptics are optional
             self.available = False
 
     def erase(self) -> None:

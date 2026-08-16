@@ -267,6 +267,31 @@ buzz continuously. Requires `FF_RUMBLE` on the pad (the 8BitDo Ultimate 2 has it
 with 16 effect slots). Effects are uploaded once and replayed by id; uploading
 per pulse would exhaust those slots. Disable with `--no-rumble`.
 
+### Game rumble passthrough
+
+Until this existed, **every rumble the game sent was dropped** — the virtual pad
+advertised no haptics at all, so Helldivers' feedback never reached your hands.
+
+python-evdev cannot fix that: its `UInput` exposes no `ff_effects_max` (required
+at device creation) and no `UI_BEGIN_FF_UPLOAD` / `UI_END_FF_UPLOAD` wrappers,
+both of which the kernel demands before a uinput device may accept effects. So
+`bike_controller/uinput_ff.py` builds the device over ctypes instead.
+
+The protocol, once the device exists: the browser uploads an effect and the
+kernel hands us an `EV_UINPUT` request; we `UI_BEGIN_FF_UPLOAD` to read it, set
+`retval = 0` to accept, and `UI_END_FF_UPLOAD`. **Skipping that leaves the
+browser blocked in its ioctl**, not merely silent — which is why the output loop
+services FF every frame. When the game later plays the effect, an `EV_FF` event
+arrives with its id and we forward the magnitudes to the physical pad, reusing a
+single effect slot so gameplay cannot exhaust the pad's 16.
+
+If any of it fails, `VirtualGamepad` falls back to a plain evdev pad and says so.
+Rumble is a luxury; a working gamepad is not.
+
+Note this shares one physical device with the bike's own cues, so a game rumble
+and a "full speed" buzz can interrupt each other. In practice they are short
+enough not to matter.
+
 ### Deliberately unsmoothed
 
 Movement scale is the **raw** value, passed straight through with no filter.
@@ -322,6 +347,7 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
 | `--poll-interval` | 0.2 | seconds between BLE poll writes; lower = fresher telemetry |
 | `--no-rumble` | off | disable haptic cues on the physical controller |
+| `--rumble-passthrough` | off | forward the game's own rumble to your controller |
 | `--launch-on-input` | — | command to run on the launch trigger (see below) |
 | `--launch-trigger` | `konami` | `konami` or `any` button press |
 | `--simulate-bike` | off | sweep cadence 0–95 rpm instead of connecting |

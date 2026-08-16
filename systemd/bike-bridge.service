@@ -51,6 +51,12 @@ WorkingDirectory=/home/nirav/bike-controller
 # 2.7Hz -- the console's own update ceiling -- so 0.05 is the knee, and going
 # lower quadruples BLE traffic for ~7%.
 #
+# --rumble-passthrough makes the virtual pad advertise force feedback, so the
+# game's rumble finally reaches the controller. Without it every rumble
+# Helldivers sends is dropped: python-evdev cannot build an FF-capable uinput
+# device, so bike_controller/uinput_ff.py does it over ctypes. If that fails for
+# any reason the bridge falls back to a plain pad rather than not starting.
+#
 # --ride-log writes one CSV per run, only while you are actually pedalling.
 # It lives OUTSIDE the repo on purpose: tools/deploy.sh rsyncs with --delete,
 # so a rides/ directory inside the checkout would be erased on every deploy.
@@ -59,7 +65,7 @@ WorkingDirectory=/home/nirav/bike-controller
 # --launch-on-input opens Xbox Remote Play when you press a controller button
 # and no browser is running. Deliberately NOT a boot autostart: the Pi being
 # powered on does not mean anyone is riding.
-ExecStart=/home/nirav/bike-controller/.venv/bin/python -u /home/nirav/bike-controller/tools/bridge.py --address E5:AD:49:06:75:76 --movement power --movement-max 75 --sprint-at 100 --poll-interval 0.05 --launch-on-input /home/nirav/bike-controller/tools/start-remoteplay.sh --status --ride-log /home/nirav/bike-rides
+ExecStart=/home/nirav/bike-controller/.venv/bin/python -u /home/nirav/bike-controller/tools/bridge.py --address E5:AD:49:06:75:76 --movement power --movement-max 75 --sprint-at 100 --poll-interval 0.05 --launch-on-input /home/nirav/bike-controller/tools/start-remoteplay.sh --status --ride-log /home/nirav/bike-rides --rumble-passthrough
 Restart=on-failure
 RestartSec=5
 # No StartLimit override: the "bike asleep at boot" case never exits the
