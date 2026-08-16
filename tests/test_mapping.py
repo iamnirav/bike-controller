@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bike_controller.mapping import (      # noqa: E402
     AxisConfig,
+    stale_after_for,
     ButtonRule,
     CadenceTracker,
     GateConfig,
@@ -44,11 +45,16 @@ def make_mapper(**gate_kw) -> Mapper:
 
 def run(mapper: Mapper, cadence, seconds: float, t0: float = 0.0,
         frame_hz: float = FRAME_HZ, feed: bool = True,
-        telemetry_hz: float = TELEMETRY_HZ):
+        telemetry_hz: float = TELEMETRY_HZ, power=None):
     """Drive the mapper for `seconds`, submitting telemetry at the real rate.
 
-    `cadence` may be a constant or a callable of elapsed time. `feed=False`
-    simulates a dead link: frames keep being evaluated, no samples arrive.
+    `cadence` and `power` may each be a constant or a callable of elapsed time.
+    `power` defaults to the console's own estimate at resistance 0, which we
+    measured as watts = 2 * (cadence - 25) -- so movement-scaling tests get a
+    plausible power signal instead of a constant zero.
+
+    `feed=False` simulates a dead link: frames keep being evaluated, no samples
+    arrive.
     """
     step = 1.0 / frame_hz
     sample_every = 1.0 / telemetry_hz
@@ -59,7 +65,11 @@ def run(mapper: Mapper, cadence, seconds: float, t0: float = 0.0,
         now = t0 + elapsed
         if feed and elapsed >= next_sample:
             value = cadence(elapsed) if callable(cadence) else cadence
-            mapper.submit(value, now=now)
+            if power is None:
+                watts = max(0.0, 2.0 * (value - 25.0))
+            else:
+                watts = power(elapsed) if callable(power) else power
+            mapper.submit(value, watts, now=now)
             next_sample += sample_every
         out = mapper.evaluate(now=now)
         elapsed += step
@@ -153,13 +163,56 @@ def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
 
 
 def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
+    """Mirrors the gate twin above -- must actually drive the deployed rate."""
     movement = MovementConfig(enabled=True, source="power",
                               min_value=0.0, max_value=75.0)
     mapper = Mapper(MappingConfig(movement=movement))
-    mapper.submit(80.0, 120.0, now=1.0)
-    assert mapper.evaluate(now=1.0).movement_scale == 1.0
-    stale = 1.0 + mapper.tracker.stale_after + 0.1
-    assert mapper.evaluate(now=stale).movement_scale == 0.0
+
+    _, t = run(mapper, 70.0, seconds=8.0, telemetry_hz=DEPLOYED_HZ)
+    assert mapper.evaluate(now=t).movement_scale > 0.9
+
+    out, _ = run(mapper, None, seconds=8.0, t0=t, feed=False,
+                 telemetry_hz=DEPLOYED_HZ)
+    assert out.movement_scale == 0.0, "dead feed left the stick deflected"
+
+
+def test_dropped_frames_do_not_kill_movement_at_any_poll_rate():
+    """A single dropped BLE frame must not zero movement mid-ride.
+
+    This is the regression that tightening stale_after to a fixed 1.5s
+    introduced: at the CLI's default poll interval the inter-sample gap is
+    ~1.30s, leaving 1.15 frames of margin, so one dropped frame killed movement
+    for several seconds. Deriving the window from the poll interval fixes it at
+    every rate -- so this checks every rate, not just the deployed one.
+    """
+    for poll_interval in (0.05, 0.1, 0.2):
+        period = 5 * (poll_interval + 0.03)
+        stale = stale_after_for(poll_interval)
+        movement = MovementConfig(enabled=True, source="power",
+                                  min_value=0.0, max_value=75.0)
+        mapper = Mapper(MappingConfig(movement=movement, stale_after=stale))
+
+        step = 1.0 / FRAME_HZ
+        now = 0.0
+        next_sample = 0.0
+        sample_index = 0
+        worst = 1.0
+        while now < 120.0:
+            if now >= next_sample:
+                sample_index += 1
+                # Drop one frame in twenty, as a flaky BLE link would.
+                if sample_index % 20 != 0:
+                    mapper.submit(70.0, 90.0, now=now)
+                next_sample += period
+            out = mapper.evaluate(now=now)
+            if now > 5.0:                     # let the feed warm up first
+                worst = min(worst, out.movement_scale)
+            now += step
+
+        assert worst > 0.0, (
+            f"--poll-interval {poll_interval}: a dropped frame zeroed movement "
+            f"(stale_after={stale:.2f}s, period={period:.2f}s)"
+        )
 
 
 def test_stale_decay_is_framerate_independent():

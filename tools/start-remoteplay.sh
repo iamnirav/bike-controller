@@ -27,7 +27,7 @@ echo "=== $(date -Is) triggered (running as $(whoami)) ==="
 
 # Chromium must be started BY us: --remote-debugging-port only takes effect at
 # launch, so we cannot attach to an instance we did not start.
-pkill -x chromium 2>/dev/null && sleep 2
+pkill chromium 2>/dev/null && sleep 2
 
 exec /home/nirav/bike-controller/.venv/bin/python -u \
      /home/nirav/bike-controller/tools/remoteplay.py --timeout 240

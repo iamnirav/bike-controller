@@ -25,10 +25,16 @@ echo "==> running tests on the Pi"
 # asserted by these tests.
 # Globbing matters too: naming files individually means a new test file is
 # silently never run.
-ssh -n "$HOST" "set -o pipefail; cd $REMOTE && \
-    for t in tests/test_*.py; do \
-        ./.venv/bin/python \"\$t\" | tail -1 || exit 1; \
-    done"
+# `ssh host "cmd"` runs the LOGIN shell; under dash, `set -o pipefail` errors and
+# execution continues with the broken semantics -- a silently absent guard,
+# which is the exact failure this guard was added to prevent. Force bash.
+ssh -n "$HOST" bash -s <<REMOTE_TESTS
+set -o pipefail
+cd $REMOTE
+for t in tests/test_*.py; do
+    ./.venv/bin/python "\$t" | tail -1 || exit 1
+done
+REMOTE_TESTS
 
 ssh -n "$HOST" "chmod +x $REMOTE/tools/*.sh"
 

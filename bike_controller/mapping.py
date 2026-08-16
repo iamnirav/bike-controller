@@ -13,8 +13,8 @@ Mapping modes, independently toggleable:
   axis      cadence drives an analog axis (throttle, stick, whatever)
   buttons   cadence thresholds fire discrete button presses
 
-The console only reports at ~0.87 Hz, so raw cadence is far too steppy to drive
-an axis directly. CadenceTracker smooths it and, critically, decays toward zero
+The console reports at ~2.56 Hz at the deployed poll interval (0.87 Hz at the
+old 0.2s one), so raw cadence is still too steppy to drive an axis directly. CadenceTracker smooths it and, critically, decays toward zero
 when samples stop arriving -- otherwise a dropped BLE link would leave the gate
 stuck open with the game happily accepting input from a stationary bike.
 """
@@ -36,11 +36,11 @@ class CadenceTracker:
     """
 
     smoothing_per_second: float = 3.0
-    # How long without a sample before the feed counts as dead. Sized in MISSED
-    # FRAMES, not seconds: at the deployed 2.56 Hz telemetry rate this is ~4
-    # missed frames. It was 2.5s when telemetry ran at 0.87 Hz (~2 frames); the
-    # poll rate tripled and this did not, leaving the fail-safe far laxer than
-    # designed. If you change --poll-interval, revisit this.
+    # How long without a sample before the feed counts as dead. This is a
+    # function of the telemetry rate, not a free constant: too large and the
+    # fail-safe is lax, too small and a single dropped BLE frame kills movement
+    # mid-ride. Callers should derive it -- see stale_after_for() -- rather than
+    # accept this default, which only suits the fastest poll rate.
     stale_after: float = 1.5
     decay_to_zero_over: float = 2.0
 
@@ -157,12 +157,32 @@ class ButtonRule:
     max_rpm: float = 1e9
 
 
+def stale_after_for(poll_interval: float, packets_per_cycle: int = 5,
+                    frames_of_margin: float = 4.0) -> float:
+    """How long to wait before declaring the telemetry feed dead.
+
+    The console answers one poll per request and the poll cycle is
+    `packets_per_cycle` writes, so the inter-sample period is roughly
+    `packets * (interval + round_trip)`. The 0.03 s round trip is measured: it
+    predicts 0.39 s at --poll-interval 0.05 and 1.15 s at 0.2, against 0.39 s
+    and 1.30 s observed.
+
+    Sizing in FRAMES rather than seconds is the point. A hand-set constant has
+    to agree with a poll interval nobody remembers to check, and when the poll
+    rate tripled the constant did not follow.
+    """
+    period = packets_per_cycle * (poll_interval + 0.03)
+    return max(1.5, frames_of_margin * period)
+
+
 @dataclass
 class MappingConfig:
     gate: GateConfig = field(default_factory=GateConfig)
     axis: AxisConfig = field(default_factory=AxisConfig)
     movement: MovementConfig = field(default_factory=MovementConfig)
     buttons: list[ButtonRule] = field(default_factory=list)
+    # None keeps CadenceTracker's default; set it from stale_after_for().
+    stale_after: float | None = None
 
 
 @dataclass
@@ -182,7 +202,9 @@ class MappingOutput:
 class Mapper:
     def __init__(self, config: MappingConfig | None = None) -> None:
         self.config = config or MappingConfig()
-        self.tracker = CadenceTracker()
+        self.tracker = (CadenceTracker(stale_after=self.config.stale_after)
+                        if self.config.stale_after is not None
+                        else CadenceTracker())
         self._gate_open = False
         self._below_since: float | None = None
         # Raw, unsmoothed. Movement scaling reads this directly.

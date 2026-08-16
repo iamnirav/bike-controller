@@ -27,6 +27,12 @@ correctly:
      so buttons land in the slots a game expects instead of arbitrary indices.
 
 This script checks 1-3 for you and reports what it finds.
+
+It deliberately re-declares the pad's identity and capabilities rather than
+importing them from bike_controller.gamepad: this is the first thing you run on
+a bare Pi, and its friendly "install evdev" message matters more here than the
+duplication. **Keep the capability list in step with gamepad.py** -- if they
+drift, this verifies a device the bridge does not build.
 """
 
 import math

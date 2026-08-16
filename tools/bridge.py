@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import contextlib
+import dataclasses
 import math
 import os
 import signal
@@ -46,6 +46,7 @@ from bike_controller.mapping import (                                # noqa: E40
     Mapper,
     MappingConfig,
     MovementConfig,
+    stale_after_for,
 )
 
 LEFT_STICK = (e.ABS_X, e.ABS_Y)
@@ -66,10 +67,30 @@ class Status:
     cadence_raw: int = 0
     cadence: float = 0.0
     power: float = 0.0
-    axis: float = 0.0
     gate: bool = False
     move: float = 1.0
     sprint: bool = False
+
+
+class ControllerHolder:
+    """The controller currently held, or None while we have none.
+
+    Written by feed_from_controller, read by output_loop and the launcher. A
+    typed cell rather than a dict so the "do we have a controller, and can it
+    buzz?" test lives in one place instead of being re-derived at each call.
+    """
+
+    def __init__(self) -> None:
+        self.reader = None
+
+    def rumble(self, name: str) -> None:
+        reader = self.reader
+        if reader is not None and reader.rumbler.available:
+            reader.rumbler.play(name)
+
+    @property
+    def can_rumble(self) -> bool:
+        return self.reader is not None and self.reader.rumbler.available
 
 
 @dataclasses.dataclass(frozen=True)
@@ -78,8 +99,8 @@ class Wiring:
 
     axis_code: int | None
     sprint_code: int | None
-    gated_axes: frozenset
-    gated_buttons: frozenset
+    gated_axes: frozenset[int]
+    gated_buttons: frozenset[int]
     rumble: bool
 
 
@@ -116,6 +137,10 @@ class Launcher:
     """
 
     COOLDOWN = 5.0            # seconds between attempts, so a button mash is one launch
+    # Worst legitimate case is ~30s to attach + the launcher's own --timeout.
+    # The bridge's liveness must not depend on a subprocess choosing to exit --
+    # that layering is what wedged the launcher in the first place.
+    MAX_RUNTIME = 360.0
 
     def __init__(self, command: list[str] | None, rumble=None) -> None:
         self.command = command
@@ -128,14 +153,18 @@ class Launcher:
     def enabled(self) -> bool:
         return bool(self.command)
 
-    # Debian ships `chromium`; other distros ship `chromium-browser`, and
-    # remoteplay.py accepts either. All three checks must agree, or the launcher
-    # decides no browser is running and relaunches on every trigger.
-    BROWSER_PATTERN = "chromium|chromium-browser"
+    # Debian ships `chromium`, other distros `chromium-browser`, and
+    # remoteplay.py accepts either -- so all the checks must agree or the
+    # launcher decides no browser is running and relaunches on every trigger.
+    #
+    # No -x: pgrep matches /proc/<pid>/comm, which the kernel caps at 15 chars
+    # (TASK_COMM_LEN), so "chromium-browser" appears as "chromium-browse" and an
+    # exact match could never hit it. A substring match on "chromium" covers both.
+    BROWSER_PATTERN = "chromium"
 
     @classmethod
     def _browser_running(cls) -> bool:
-        return subprocess.run(["pgrep", "-x", cls.BROWSER_PATTERN],
+        return subprocess.run(["pgrep", cls.BROWSER_PATTERN],
                               capture_output=True).returncode == 0
 
     async def _run(self) -> None:
@@ -148,7 +177,15 @@ class Launcher:
                 *self.command, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            returncode = await proc.wait()
+            try:
+                returncode = await asyncio.wait_for(proc.wait(), self.MAX_RUNTIME)
+            except asyncio.TimeoutError:
+                print(f"  launcher exceeded {self.MAX_RUNTIME:.0f}s; killing it",
+                      flush=True)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                await proc.wait()
+                returncode = -1
         except asyncio.CancelledError:
             raise
         except Exception as exc:                               # noqa: BLE001
@@ -267,8 +304,13 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                 while True:
                     # A console that stays connected but stops replying is
                     # invisible to both the disconnect callback and the write
-                    # error path, so bound the wait explicitly. Telemetry
-                    # arrives at ~0.87 Hz; 10s is ~9 missed frames.
+                    # error path, so bound the wait explicitly.
+                    #
+                    # Deliberately much longer than the mapper's staleness
+                    # window: the mapper fails safe in ~1.6s, which is what
+                    # protects the rider. This only decides when to spend a
+                    # reconnect, which costs a BLE round trip, so it can afford
+                    # to be patient. ~26 missed frames at the deployed rate.
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
                     status.bike_seen = time.monotonic()
@@ -295,18 +337,21 @@ async def feed_simulated(mapper: Mapper, status: Status) -> None:
         power = max(0.0, 2.0 * (cadence - 25.0))
         status.cadence_raw = round(cadence)
         mapper.submit(cadence, power)
-        await asyncio.sleep(1.0)          # match the real console's ~1 Hz rate
+        # Mirror the deployed telemetry rate (~2.56 Hz), not the original
+        # ~0.87 Hz -- otherwise the simulator runs closer to the staleness
+        # window than the real thing ever does.
+        await asyncio.sleep(0.4)
 
 
 async def feed_from_controller(
-    holder: dict, status: Status, path_arg: str | None, grab: bool,
+    holder: ControllerHolder, status: Status, path_arg: str | None, grab: bool,
     launcher: "Launcher | None" = None,
     detector: SequenceDetector | None = None,
 ) -> None:
     """Hold a controller open, re-acquiring it if it is unplugged or absent.
 
     The controller may not be plugged in when this starts, and USB pads get
-    unplugged. `holder["reader"]` is None whenever we have no controller, and
+    unplugged. `holder.reader` is None whenever we have no controller, and
     the output loop treats that as "emit nothing".
     """
     while True:
@@ -319,7 +364,7 @@ async def feed_from_controller(
                 continue
 
             reader = ControllerReader(path, grab=grab)
-            holder["reader"] = reader
+            holder.reader = reader
             status.controller = reader.device.name
             print(f"  controller acquired: {reader.device.name} at {path}"
                   f" ({'grabbed' if reader.grabbed else 'shared'},"
@@ -340,7 +385,7 @@ async def feed_from_controller(
                     launcher.trigger()
             raise ConnectionError("controller event stream ended")
         except asyncio.CancelledError:
-            holder["reader"] = None
+            holder.reader = None
             if reader is not None:
                 reader.close()
             raise
@@ -348,7 +393,7 @@ async def feed_from_controller(
             # Drop the reader BEFORE backing off. Its axis/button dict still
             # holds the last state, so leaving it in place would replay
             # stick-forward and held buttons for the whole 2s sleep.
-            holder["reader"] = None
+            holder.reader = None
             if reader is not None:
                 reader.close()
             status.controller = "none"
@@ -360,7 +405,7 @@ async def feed_from_controller(
 async def output_loop(
     pad: VirtualGamepad,
     mapper: Mapper,
-    holder: dict,
+    holder: ControllerHolder,
     wiring: Wiring,
     status: Status,
     stop: asyncio.Event,
@@ -375,7 +420,6 @@ async def output_loop(
         out = mapper.evaluate()
         status.gate = out.gate_open
         status.cadence = out.cadence
-        status.axis = out.axis
         status.move = out.movement_scale
         status.sprint = out.sprint
         # Take power from the same evaluate() that produced `move`, not from the
@@ -387,7 +431,7 @@ async def output_loop(
         # (and sticks stay centred, since 0 is centre for a signed axis).
         pad.neutral()
 
-        reader = holder.get("reader")
+        reader = holder.reader
         if reader is not None:
             buttons, axes = reader.snapshot()
             blocked = not out.gate_open
@@ -412,7 +456,7 @@ async def output_loop(
         if out.sprint and wiring.sprint_code is not None:
             pad.set_button(wiring.sprint_code, True)
 
-        if wiring.rumble and reader is not None and reader.rumbler.available:
+        if wiring.rumble and holder.can_rumble:
             # Rising edges only. The hysteresis in mapping.py matters more here
             # than it did with paired on/off cues: without it, effort hovering
             # at a threshold would re-fire the SAME cue over and over.
@@ -447,10 +491,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--address", help="bike BLE address")
     parser.add_argument("--simulate-bike", action="store_true")
-    parser.add_argument("--poll-interval", type=float, default=0.2,
-                        help="seconds between BLE poll writes (default 0.2). "
-                             "Lower means fresher telemetry; see README for the "
-                             "measured trade-off.")
+    parser.add_argument("--poll-interval", type=float, default=0.05,
+                        help="seconds between BLE poll writes (default 0.05, the "
+                             "measured knee). The staleness window is derived "
+                             "from this, so raising it also relaxes the fail-safe.")
 
     parser.add_argument("--controller", help="evdev path; default is autodetect")
     parser.add_argument("--no-controller", action="store_true")
@@ -507,7 +551,8 @@ def build_parser() -> argparse.ArgumentParser:
 class Settings:
     config: MappingConfig
     wiring: Wiring
-    gate_groups: list        # resolved names, for display
+    gate_groups: tuple[str, ...]     # resolved names, for display
+    notes: tuple[str, ...] = ()      # emitted by print_banner
 
 
 def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
@@ -543,10 +588,11 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
     # with extra steps. Done on the parsed list, before resolving: an earlier
     # version edited the display string afterwards, so the note printed while
     # the stick stayed gated.
+    notes: list[str] = []
     if movement.enabled and "left_stick" in groups:
         groups.remove("left_stick")
-        print("Note: --movement is on, so left_stick is no longer gated "
-              "(scaling handles it).")
+        notes.append("Note: --movement is on, so left_stick is no longer gated "
+                     "(scaling handles it).")
 
     try:
         gated_axes, gated_buttons = resolve_gate_targets(groups)
@@ -570,6 +616,9 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             ),
             movement=movement,
             buttons=args.button,
+            # Derived, never hand-set: a fixed window silently stops matching
+            # the telemetry rate the moment --poll-interval changes.
+            stale_after=stale_after_for(args.poll_interval),
         ),
         wiring=Wiring(
             axis_code=axis_code,
@@ -579,7 +628,8 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             gated_buttons=frozenset(gated_buttons),
             rumble=not args.no_rumble,
         ),
-        gate_groups=groups,
+        gate_groups=tuple(groups),
+        notes=tuple(notes),
     )
 
 
@@ -593,6 +643,8 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     scaling: off" based on whether a LAUNCH COMMAND was configured.
     """
     config, wiring = settings.config, settings.wiring
+    for note in settings.notes:
+        print(note)
     print(f"Virtual pad created: {pad.ui.device.path}")
 
     if config.gate.enabled and (wiring.gated_axes or wiring.gated_buttons):
@@ -608,6 +660,8 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
         floor = f", floor {movement.floor:.2f}" if movement.floor else ""
         print(f"Movement: left stick scaled by {movement.source} "
               f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
+        print(f"Fail-safe: movement zeroes after "
+              f"{config.stale_after or 1.5:.2f}s without telemetry")
     else:
         print("Movement: off")
 
@@ -641,7 +695,7 @@ async def main() -> int:
     holder: dict = {"reader": None}
 
     def rumble(name: str) -> None:
-        reader = holder.get("reader")
+        reader = holder.reader
         if reader is not None and reader.rumbler.available:
             reader.rumbler.play(name)
 

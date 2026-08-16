@@ -116,13 +116,16 @@ class IconBike:
         """Record a link failure and wake any waiting stream()."""
         if self._failure is None:
             self._failure = exc
-        # A full queue is exactly when a waiter most needs waking, so make room
-        # rather than dropping the sentinel. The 10s wait_for in the consumer is
-        # still the real guarantee; this just makes the common case immediate.
-        with contextlib.suppress(asyncio.QueueEmpty):
-            self._updates.get_nowait()
-        with contextlib.suppress(asyncio.QueueFull):
+        # A full queue is exactly when a waiter most needs waking, so drop the
+        # oldest sample to make room rather than dropping the sentinel -- but
+        # only when full, so a queue with space keeps every sample.
+        try:
             self._updates.put_nowait(None)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._updates.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                self._updates.put_nowait(None)
 
     def _on_disconnect(self, _client) -> None:
         self._fail(ConnectionError("BLE disconnected"))

@@ -187,10 +187,17 @@ async def drive(page_ws: str, dry_run: bool, timeout: float) -> int:
         info: dict = {}
         while time.monotonic() < deadline:
             attempt += 1
-            reply = await send("Runtime.evaluate", {
-                "expression": FIND_BUTTON_JS % json.dumps(BUTTON_TEXT),
-                "returnByValue": True,
-            })
+            try:
+                reply = await send("Runtime.evaluate", {
+                    "expression": FIND_BUTTON_JS % json.dumps(BUTTON_TEXT),
+                    "returnByValue": True,
+                })
+            except TimeoutError as exc:
+                # One slow evaluate should cost an iteration, not the session.
+                # The retry loop exists precisely to outlast a slow page.
+                print(f"  {exc}; retrying", flush=True)
+                await asyncio.sleep(1.0)
+                continue
             raw = reply.get("result", {}).get("result", {}).get("value")
             info = json.loads(raw) if raw else {"found": False}
 
@@ -215,8 +222,11 @@ async def drive(page_ws: str, dry_run: bool, timeout: float) -> int:
                 # first and only then the real dialog, so an early click can
                 # land on nothing -- in which case no stream starts and we come
                 # back round and click the real one.
-                if await wait_for_stream(send, timeout=25.0, quiet=True) == 0:
-                    return 0
+                try:
+                    if await wait_for_stream(send, timeout=25.0, quiet=True) == 0:
+                        return 0
+                except TimeoutError as exc:
+                    print(f"  {exc}; retrying", flush=True)
                 print("  no stream yet; looking for the button again")
             elif attempt % 10 == 0:
                 print(f"  waiting... title={info.get('title','?')!r} "
@@ -248,8 +258,10 @@ async def main() -> int:
         os.environ.setdefault("WAYLAND_DISPLAY", "wayland-0")
         os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 
-    if not args.no_launch:
-        launch_chromium(args.url, args.port)
+    if not args.no_launch and launch_chromium(args.url, args.port) is None:
+        # Otherwise we wait 30s and then blame a stale Chromium instance, which
+        # is actively misleading when the binary simply is not installed.
+        return 1
 
     targets = wait_for_cdp(args.port, timeout=30.0)
     if targets is None:

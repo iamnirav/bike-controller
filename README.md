@@ -148,9 +148,9 @@ cadence and byte 12 being power.
 
 ### Update rate
 
-**~0.87 Hz** — one telemetry frame per ~1.15 s poll cycle. Fine for cadence-driven
-control, which changes over seconds. If gating feels laggy, the measured
-bottleneck is the 200 ms sleep (~87% of cycle time), not the BLE round trip
+**~2.56 Hz at the deployed `--poll-interval 0.05`** — see the measured table
+below. It was 0.87 Hz at the original 0.2 s interval, where the sleep was ~87%
+of cycle time rather than the BLE round trip
 (~30 ms), so `--interval 0.05` should get roughly 2.5 Hz. Verify with the Hz
 readout in `tools/live.py` before assuming.
 
@@ -271,13 +271,19 @@ per pulse would exhaust those slots. Disable with `--no-rumble`.
 
 Movement scale is the **raw** value, passed straight through with no filter.
 This is a decision, not an oversight: it is not yet known whether smoothing is
-needed, and at ~0.87 Hz telemetry any filter also adds lag, which on movement
+needed, and at ~2.56 Hz telemetry any filter also adds lag, which on movement
 speed feels like input delay. Judge the real feel first.
 
 One exception, which is safety rather than smoothing: **a stale feed forces the
 scale to 0**. Otherwise a dropped BLE link would freeze the stick at its last
 deflection and walk your character into a wall indefinitely.
-`tests/test_mapping.py` asserts this.
+
+"Stale" is **derived from `--poll-interval`, not a fixed constant** — about four
+missed frames, so 1.6 s at the deployed 0.05 and 4.6 s at 0.2. That coupling
+matters: a hard-coded 1.5 s window left barely one frame of margin at the slower
+poll rate, and a single dropped BLE frame would zero movement mid-ride.
+`tests/test_mapping.py` asserts both the fail-safe and that dropped frames do
+not trip it, at every poll rate.
 
 ### Where the thresholds came from
 
@@ -335,8 +341,9 @@ at the boundary; the grace period stops one slow pedal stroke killing your input
 mid-fight.
 
 **Smoothing** lives in `bike_controller/mapping.py` (`smoothing_per_second`,
-default 3.0). Higher is snappier and jitterier. At ~0.87 Hz telemetry, raw
-cadence is far too steppy to drive an axis directly.
+default 3.0). Higher is snappier and jitterier. Even at 2.56 Hz, raw cadence is
+too steppy to drive an axis directly. Note this applies to the *cadence* axis
+and the gate only — movement scale is deliberately unsmoothed, see above.
 
 ---
 
@@ -539,8 +546,8 @@ config file. Change thresholds there and deploy.
 ## Ideas, not yet built
 
 - **Decide whether movement scaling needs smoothing.** Currently raw by design.
-  If the stepping at ~0.87 Hz is noticeable in play, the fix is either a filter
-  or a faster poll rate — try the poll rate first, since a filter costs lag.
+  The poll rate has since been raised to the measured knee, so if stepping is
+  still noticeable a filter is the remaining option — and it costs lag.
 - **Tune the thresholds against real rides.** `--movement-max` and `--sprint-at`
   are calibrated from one capture at low resistance.
 - **A cheap screen or a phone tap** if the Konami launcher ever proves flaky;
