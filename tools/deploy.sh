@@ -42,7 +42,10 @@ echo "==> pushing $BRANCH"
 git push -u origin "$BRANCH"
 
 echo "==> updating $HOST ($REMOTE_DIR) to $BRANCH"
-ssh -n "$HOST" bash -s <<REMOTE
+# NOT `ssh -n`: -n redirects stdin from /dev/null, so `bash -s` reads nothing,
+# runs nothing, and exits 0 -- a deploy that silently does nothing and reports
+# success. The whole remote block was skipped this way once.
+ssh "$HOST" bash -s <<REMOTE
 set -euo pipefail
 cd "$REMOTE_DIR"
 git fetch --prune origin
@@ -53,5 +56,17 @@ git pull --ff-only origin "$BRANCH"
 echo "    now at \$(git rev-parse --short HEAD) on \$(git rev-parse --abbrev-ref HEAD)"
 ./install.sh
 REMOTE
+
+# Verify the Pi actually moved. The remote block reporting success is not the
+# same as the remote block having run -- see above.
+echo "==> confirming"
+LOCAL_SHA="$(git rev-parse HEAD)"
+REMOTE_SHA="$(ssh "$HOST" "cd $REMOTE_DIR && git rev-parse HEAD" </dev/null)"
+if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+    echo "ERROR: the Pi is at ${REMOTE_SHA:0:9}, expected ${LOCAL_SHA:0:9}." >&2
+    echo "       The update did not take effect." >&2
+    exit 1
+fi
+echo "    $HOST is at ${REMOTE_SHA:0:9} on $BRANCH"
 
 echo "==> done"
