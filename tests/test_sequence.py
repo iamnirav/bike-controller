@@ -43,14 +43,22 @@ def test_extra_leading_up_still_matches():
 
 
 def test_step_timeout_resets_progress():
+    """A long pause mid-entry must abandon the attempt.
+
+    Assert on the RETURN VALUE, not on `index`: feed() resets index to 0 the
+    moment it completes, so `index != len(sequence)` is true whether or not the
+    timeout works. Mutation testing caught that -- disabling the timeout
+    entirely passed this test.
+    """
     detector = SequenceDetector(KONAMI, step_timeout=3.0)
     for i, token in enumerate(KONAMI[:5]):
-        detector.feed(token, now=i * 0.3)
-    # Long pause, then the remainder: must NOT complete.
+        assert detector.feed(token, now=i * 0.3) is False
     assert detector.index > 0
+
+    fired = False
     for i, token in enumerate(KONAMI[5:]):
-        detector.feed(token, now=100.0 + i * 0.3)
-    assert detector.index != len(KONAMI)
+        fired |= detector.feed(token, now=100.0 + i * 0.3)
+    assert not fired, "sequence completed despite a long pause part-way through"
 
 
 def test_fires_again_on_second_entry():

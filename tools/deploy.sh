@@ -12,6 +12,11 @@ RESTART=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Locally first: a mutant that survives means a test is not constraining what it
+# claims to. Run before syncing, so a weakened suite never reaches the Pi.
+echo "==> mutation testing (local)"
+python3 "$HERE/tools/mutate.py" | tail -3
+
 echo "==> syncing $HERE -> $HOST:$REMOTE"
 rsync -az --delete \
       --exclude '.venv' --exclude '__pycache__' --exclude '.git' \

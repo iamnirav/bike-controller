@@ -21,7 +21,12 @@ After=bluetooth.target
 Wants=bluetooth.target
 
 [Service]
-Type=simple
+# notify + WatchdogSec turns "the process exists" into "the process is still
+# emitting frames". Restart=on-failure only catches a process that EXITS; a
+# stalled output loop leaves the uinput device latched at its last values --
+# stick deflected, gate open -- with systemd reporting the unit healthy.
+Type=notify
+WatchdogSec=15
 # Needs root for /dev/uinput and for EVIOCGRAB on the controller.
 User=root
 WorkingDirectory=/home/nirav/bike-controller

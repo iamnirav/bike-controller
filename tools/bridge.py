@@ -40,6 +40,7 @@ from bike_controller.gamepad import (                                # noqa: E40
 )
 from bike_controller.ridelog import RideLogger                 # noqa: E402
 from bike_controller.sequence import SequenceDetector          # noqa: E402
+from bike_controller.watchdog import Watchdog                  # noqa: E402
 from bike_controller.mapping import (                                # noqa: E402
     AxisConfig,
     ButtonRule,
@@ -416,6 +417,7 @@ async def output_loop(
     wiring: Wiring,
     status: Status,
     stop: asyncio.Event,
+    watchdog: Watchdog | None = None,
 ) -> None:
     period = 1.0 / FRAME_RATE
     # Haptics are edge-triggered: fire on the transition, not every frame.
@@ -474,6 +476,11 @@ async def output_loop(
         prev_max, prev_sprint = out.at_max, out.sprint
 
         pad.sync()
+        # Pinged from HERE, not from a timer: the point is to attest that frames
+        # are still being emitted. A ping from anywhere else would keep systemd
+        # happy while the pad sat latched at its last values.
+        if watchdog is not None:
+            watchdog.ping()
         await asyncio.sleep(period)
 
 
@@ -711,6 +718,7 @@ async def main() -> int:
     settings = build_settings(args, parser)
     mapper = Mapper(settings.config)
     status = Status()
+    watchdog = Watchdog()
     ride_log = RideLogger(args.ride_log) if args.ride_log else None
     holder = ControllerHolder()
     launcher = Launcher(
@@ -749,7 +757,8 @@ async def main() -> int:
         print_banner(args, settings, launcher, detector, pad, mapper)
 
         tasks = [asyncio.create_task(
-            output_loop(pad, mapper, holder, settings.wiring, status, stop))]
+            output_loop(pad, mapper, holder, settings.wiring, status, stop,
+                        watchdog))]
         if args.simulate_bike:
             tasks.append(asyncio.create_task(feed_simulated(mapper, status)))
         else:
@@ -766,8 +775,16 @@ async def main() -> int:
         for task in tasks:
             task.add_done_callback(on_task_done)
 
+        if watchdog.active:
+            print(f"Watchdog: pinging every {watchdog.interval:.1f}s from the "
+                  f"output loop")
+        else:
+            print("Watchdog: not supervised")
+        watchdog.ready()
+
         print("Running. Ctrl-C to stop.\n")
         await stop.wait()
+        watchdog.stopping()
 
         for task in tasks:
             task.cancel()
@@ -775,6 +792,7 @@ async def main() -> int:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    watchdog.close()
     if ride_log is not None:
         ride_log.close()
         if ride_log.path is not None:
