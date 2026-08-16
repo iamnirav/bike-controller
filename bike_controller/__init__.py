@@ -12,6 +12,7 @@ if TYPE_CHECKING:                                  # for type checkers only
     from .bike import BikeState, IconBike
     from .gamepad import ControllerReader, VirtualGamepad
     from .mapping import Mapper, MappingConfig
+    from .ridelog import RideLogger
 
 _LAZY = {
     "BikeState": ".bike",
@@ -20,6 +21,7 @@ _LAZY = {
     "ControllerReader": ".gamepad",
     "Mapper": ".mapping",
     "MappingConfig": ".mapping",
+    "RideLogger": ".ridelog",
 }
 
 __all__ = list(_LAZY)

@@ -38,6 +38,7 @@ from bike_controller.gamepad import (                                # noqa: E40
     ControllerReader,
     VirtualGamepad,
 )
+from bike_controller.ridelog import RideLogger                 # noqa: E402
 from bike_controller.sequence import SequenceDetector          # noqa: E402
 from bike_controller.mapping import (                                # noqa: E402
     AxisConfig,
@@ -277,7 +278,8 @@ def parse_button(spec: str) -> ButtonRule:
 
 
 async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
-                         poll_interval: float) -> None:
+                         poll_interval: float,
+                         ride_log: RideLogger | None = None) -> None:
     """Keep a bike link alive, reconnecting indefinitely.
 
     This must never give up. At boot the console is asleep and unreachable, and
@@ -314,6 +316,12 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     status.cadence_raw = sample.cadence_rpm
                     status.bike_seen = time.monotonic()
                     mapper.submit(sample.cadence_rpm, sample.power_w)
+                    if ride_log is not None:
+                        # `status` carries the output loop's most recent
+                        # evaluation. Calling mapper.evaluate() here instead
+                        # would advance the filter's clock and steal dt from the
+                        # loop that actually drives the pad.
+                        ride_log.log(sample, status)
         except asyncio.CancelledError:
             raise
         except (Exception, StopAsyncIteration) as exc:             # noqa: BLE001
@@ -500,6 +508,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-grab", action="store_true",
                         help="do not take the controller exclusively (debugging only)")
     parser.add_argument("--status", action="store_true", help="print state once a second")
+    parser.add_argument("--ride-log", metavar="DIR", default=None,
+                        help="append ride telemetry to a CSV in DIR (one file "
+                             "per run, written only while you are riding)")
 
     parser.add_argument("--movement", choices=["none", "power", "cadence"],
                         default="none",
@@ -679,6 +690,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     # and duplicating CadenceTracker's default here would let the banner lie.
     print(f"Fail-safe: input zeroes after "
           f"{mapper.tracker.stale_after:.2f}s without telemetry")
+    print(f"Ride log: {args.ride_log or 'off'}")
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
 
@@ -699,6 +711,7 @@ async def main() -> int:
     settings = build_settings(args, parser)
     mapper = Mapper(settings.config)
     status = Status()
+    ride_log = RideLogger(args.ride_log) if args.ride_log else None
     holder = ControllerHolder()
     launcher = Launcher(
         [args.launch_on_input] if args.launch_on_input else None,
@@ -741,7 +754,8 @@ async def main() -> int:
             tasks.append(asyncio.create_task(feed_simulated(mapper, status)))
         else:
             tasks.append(asyncio.create_task(
-                feed_from_bike(args.address, mapper, status, args.poll_interval)))
+                feed_from_bike(args.address, mapper, status, args.poll_interval,
+                               ride_log)))
         if not args.no_controller:
             tasks.append(asyncio.create_task(
                 feed_from_controller(holder, status, args.controller,
@@ -760,6 +774,11 @@ async def main() -> int:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+    if ride_log is not None:
+        ride_log.close()
+        if ride_log.path is not None:
+            print(f"Ride log: {ride_log.rows} rows -> {ride_log.path}")
 
     if crashed:
         # Exit non-zero so systemd's Restart=on-failure can actually help.

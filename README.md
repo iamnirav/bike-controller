@@ -328,6 +328,7 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--no-controller` | off | bike-driven input only |
 | `--no-grab` | off | share the controller instead of taking it exclusively (debugging) |
 | `--status` | off | print state once a second |
+| `--ride-log DIR` | — | append ride telemetry to a CSV in DIR |
 
 Enabling `--movement` automatically drops `left_stick` from the gate set —
 gating *and* scaling the same stick is just the gate with extra steps.
@@ -493,6 +494,36 @@ Details that took a while to get right:
   and the script dies before doing anything.
 
 Log: `/run/user/1000/bike-remoteplay.log`.
+
+## Ride logs
+
+Every telemetry sample is appended to a CSV, one file per bridge run, **only
+while you are actually pedalling** — the bridge runs whenever the Pi is on, and
+logging the idle hours would be ~10 MB a day of zeros. An unridden day leaves no
+file at all.
+
+```
+wall_time, t, cadence_rpm, power_w, resistance, movement_scale, sprint, gate_open
+```
+
+Logs live at `~/bike-rides/` on the Pi — **outside the repo on purpose**, since
+`tools/deploy.sh` rsyncs with `--delete` and would erase them otherwise.
+
+```bash
+python3 tools/ride_report.py ~/bike-rides/
+```
+
+That prints your power and cadence distribution while riding, how much of the
+ride you spent at full speed and sprinting, and suggests `--movement-max` and
+`--sprint-at` from the data: full speed at the median of your riding power (so
+about half a ride is at full deflection), sprint at the 90th percentile (so it
+stays a genuine push). Those thresholds were tuned by feel three times
+(130 → 100 → 75); this is how to stop guessing.
+
+The logger deliberately **never calls `Mapper.evaluate()`** — `value()` is a
+mutating getter that advances the filter's clock, so a second caller would steal
+`dt` from the output loop. Derived fields come from `Status` instead. Logging
+failures are swallowed: a full disk must not end a ride.
 
 ## Working on this
 
