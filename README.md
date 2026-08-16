@@ -61,6 +61,27 @@ the URL. Everything else lives in `config.env` (created from
 sudo systemctl enable --now bike-bridge
 ```
 
+### Updating
+
+```bash
+git pull && ./install.sh
+```
+
+`install.sh` is idempotent and skips what has not changed, so this is always
+correct and usually takes seconds. Most updates need nothing beyond a restart —
+but rather than make you remember which ones need more, re-running it is the one
+answer that is never wrong. It restarts the service itself if it was running.
+
+### Removing it
+
+```bash
+./uninstall.sh            # keeps config.env and your ride logs
+./uninstall.sh --purge    # removes those too, after confirming
+```
+
+Reverses everything `install.sh` put on the machine. It does not touch the repo
+or apt packages, and says so.
+
 ## Day-to-day use
 
 **No laptop needed.** The bridge starts on boot, so the routine is:
@@ -577,16 +598,30 @@ failures are swallowed: a full disk must not end a ride.
 
 ## Working on this
 
-**This machine is the source of truth; the Pi is a deployment target.** Never
-edit on the Pi — the next deploy silently overwrites it.
+**The Pi installs and updates from git, exactly as anyone else would.** Work on a
+branch, push it, and the Pi pulls that branch:
 
 ```bash
-tools/deploy.sh               # sync, run tests on the Pi, restart the bridge
-tools/deploy.sh --no-restart  # sync only
+git switch -c my-change
+# ... edit, commit ...
+tools/deploy.sh               # gate, push, and update the Pi to this branch
 ```
 
-The Pi is `ssh <your-pi>`, resolved by **mDNS** rather than a fixed IP; its DHCP lease
-moves whenever it is unplugged.
+`tools/deploy.sh` is a convenience, not a requirement — it is `git push` plus
+`git pull && ./install.sh` over SSH. What it adds is a gate: the suite and
+mutation testing run **before** anything leaves your machine, and `install.sh`
+runs the self-test on arrival. It refuses to run with a dirty tree, because the
+Pi pulls from git and uncommitted work would silently not be deployed.
+
+It reads `PI_HOST` from `config.env`. Use the Pi's **mDNS** name rather than an
+IP: its DHCP lease moves whenever it is unplugged, and the old address gets
+handed to another device, which presents as a baffling "connection refused".
+
+To do it without the script:
+
+```bash
+ssh <your-pi> 'cd bike-controller && git pull && ./install.sh'
+```
 
 ### Tests
 
@@ -594,7 +629,15 @@ moves whenever it is unplugged.
 python3 tests/test_mapping.py     # gate, movement scaling, the fail-safe
 python3 tests/test_sequence.py    # Konami matcher
 python3 tests/test_cues.py        # haptic cue names line up
+python3 tests/test_ridelog.py     # ride logging and rotation
+python3 tests/test_watchdog.py    # sd_notify, against a real socket
+python3 tests/test_uinput_abi.py  # kernel struct sizes and ioctl numbers
 ```
+
+On the Pi, `tools/selftest.sh` goes further than the unit tests: it runs the real
+bridge for 8 seconds and requires it to survive, bring up force feedback, and
+write a ride log. The unit tests never import `tools/bridge.py`, so they cannot
+catch a wiring error — that has already shipped a bridge that could not start.
 
 All run anywhere — no hardware, no evdev, no BLE, time injected — so they are
 deterministic and instant.
