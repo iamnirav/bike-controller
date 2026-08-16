@@ -1,0 +1,11 @@
+# Virtualenv (recreate with: python3 -m venv .venv && pip install -r requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# Raw capture output from the diagnostic tools. Useful while reverse-engineering
+# a console, but machine-specific and regenerable -- see README for how.
+probe-*.txt
+scan-*.txt
+
+.DS_Store

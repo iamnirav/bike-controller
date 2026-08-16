@@ -1,0 +1,22 @@
+# Hide the physical controller from browsers and games.
+#
+# tools/bridge.py grabs the controller exclusively (EVIOCGRAB) and re-presents
+# it as a virtual Xbox 360 pad. The grab stops the kernel delivering events to
+# any other handler, but it does NOT remove the /dev/input/jsN node -- so
+# Chromium still enumerates the physical pad as a phantom gamepad that never
+# reports input. A game binding to that slot would get nothing at all.
+#
+# Chromium only checks whether ID_INPUT_JOYSTICK is PRESENT, not its value, so
+# setting it to "0" would not help; the property has to be removed outright.
+#
+# Matches the 8BitDo Ultimate 2 Wireless Controller. For a different pad, get
+# its ids from:  udevadm info -a --name=/dev/input/jsN | grep id/
+#
+# Install:
+#   sudo cp udev/99-bike-controller.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger -s input
+#
+# Uninstall (to use the controller directly in a browser again):
+#   sudo rm /etc/udev/rules.d/99-bike-controller.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger -s input
+SUBSYSTEM=="input", ATTRS{id/vendor}=="2dc8", ATTRS{id/product}=="310b", ENV{ID_INPUT_JOYSTICK}=""

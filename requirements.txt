@@ -1,0 +1,5 @@
+# Bike side (works on macOS and Linux)
+bleak>=0.22
+
+# Gamepad side (Linux / Raspberry Pi only)
+evdev>=1.7 ; sys_platform == "linux"
