@@ -1,0 +1,37 @@
+# Generated into systemd/bike-bridge.service by install.sh, which fills in
+# @REPO@. Edit this template, not the generated file.
+[Unit]
+Description=bike-controller bridge (bike + gamepad -> virtual Xbox pad)
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+# notify + WatchdogSec turns "the process exists" into "the process is still
+# emitting frames". Restart=on-failure only catches a process that EXITS; a
+# stalled output loop leaves the uinput device latched at its last values --
+# stick deflected, gate open -- with systemd reporting the unit healthy.
+Type=notify
+WatchdogSec=15
+
+# Needs root for /dev/uinput and for EVIOCGRAB on the controller.
+User=root
+WorkingDirectory=@REPO@
+
+# All tuning lives here. Change a threshold, restart -- no daemon-reload, and
+# no editing a systemd unit to change how hard you have to pedal.
+EnvironmentFile=@REPO@/config.env
+
+# The wrapper builds the argument list in bash, where an unset value can be
+# omitted entirely. systemd would pass an empty string instead, so
+# `--address ""` would become a real (and wrong) argument.
+ExecStart=@REPO@/tools/run-bridge.sh
+
+Restart=on-failure
+RestartSec=5
+# No StartLimit override: the "bike asleep at boot" case never exits the
+# process (feed_from_bike retries internally, forever, by design), so disabling
+# the limit would only hide genuine hard failures behind an endless restart
+# loop. Note StartLimit* belongs in [Unit] anyway.
+
+[Install]
+WantedBy=multi-user.target

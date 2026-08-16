@@ -8,14 +8,18 @@
 # IMPORTANT: the bridge runs as root (it needs /dev/uinput and EVIOCGRAB), so
 # this script is invoked as root and MUST drop to the desktop user. Chromium has
 # to run as the owner of the Wayland session, and as root XDG_RUNTIME_DIR points
-# at /run/user/0, which does not exist -- the script then dies before doing
+# at /run/user/0, which does not exist -- the script would die before doing
 # anything at all.
 set -u
 
-TARGET_USER="nirav"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ -f "$REPO/config.env" ] && . "$REPO/config.env"
+
+# Whoever owns the checkout is the desktop user, unless told otherwise.
+: "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 
 if [ "$(id -u)" -eq 0 ]; then
-    exec runuser -u "$TARGET_USER" -- "$0" "$@"
+    exec runuser -u "$DESKTOP_USER" -- "$0" "$@"
 fi
 
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -29,5 +33,4 @@ echo "=== $(date -Is) triggered (running as $(whoami)) ==="
 # launch, so we cannot attach to an instance we did not start.
 pkill chromium 2>/dev/null && sleep 2
 
-exec /home/nirav/bike-controller/.venv/bin/python -u \
-     /home/nirav/bike-controller/tools/remoteplay.py --timeout 240
+exec "$REPO/.venv/bin/python" -u "$REPO/tools/remoteplay.py" --timeout 240

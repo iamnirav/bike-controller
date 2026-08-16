@@ -1,7 +1,8 @@
 """Live telemetry from a NordicTrack G/GX LE (Icon Health & Fitness) console.
 
-Field offsets and the poll sequence were confirmed empirically against console
-"54801-VV" firmware 22017.0908 on 2026-08-13; see README.md for the evidence.
+Field offsets and the poll sequence were confirmed empirically against a
+NordicTrack G/GX LE; see README.md for the console model, firmware and the
+evidence that identified each field.
 
 Usage:
 

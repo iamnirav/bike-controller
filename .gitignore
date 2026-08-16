@@ -1,11 +1,29 @@
-# Virtualenv (recreate with: python3 -m venv .venv && pip install -r requirements.txt)
+# Virtualenv (recreate with ./install.sh)
 .venv/
 __pycache__/
 *.pyc
 
-# Raw capture output from the diagnostic tools. Useful while reverse-engineering
-# a console, but machine-specific and regenerable -- see README for how.
+# Local configuration: contains your Xbox console ID and any tuning overrides.
+# Copy config.env.example to config.env and edit. Never commit config.env.
+config.env
+
+# Generated at install time from the .template files, with paths and hardware
+# IDs specific to your machine.
+systemd/bike-bridge.service
+udev/99-bike-controller.rules
+
+# Ride telemetry. Timestamped records of when you exercised and how hard --
+# personal data, and nothing about it belongs in a public repo.
+ride-*.csv
+rides/
+*.log
+
+# Raw capture output from the diagnostic tools. Machine-specific, regenerable,
+# and scan output in particular is a census of every BLE device near your home.
 probe-*.txt
 scan-*.txt
 
 .DS_Store
+.idea/
+.vscode/
+*.swp

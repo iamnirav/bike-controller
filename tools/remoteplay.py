@@ -30,7 +30,10 @@ import sys
 import time
 import urllib.request
 
-DEFAULT_URL = "https://play.xbox.com/remoteplay/F4000F4315744C89"
+# Built from XBOX_CONSOLE_ID rather than hardcoded: the console ID identifies a
+# specific person's Xbox, and this repo is public.
+CONSOLE_ID = os.environ.get("XBOX_CONSOLE_ID", "").strip()
+DEFAULT_URL = f"https://play.xbox.com/remoteplay/{CONSOLE_ID}" if CONSOLE_ID else ""
 DEFAULT_PORT = 9222
 BUTTON_TEXT = "click to start playing"
 
@@ -243,7 +246,9 @@ async def drive(page_ws: str, dry_run: bool, timeout: float) -> int:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument("--url", default=DEFAULT_URL,
+                        help="Remote Play URL; defaults to "
+                             "XBOX_CONSOLE_ID from config.env")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--dry-run", action="store_true",
                         help="report whether the button is there, but do not click")
@@ -253,6 +258,14 @@ async def main() -> int:
                         help="attach to an already-running Chromium")
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
+
+    if not args.url:
+        print("No Xbox console ID. Set XBOX_CONSOLE_ID in config.env, or pass "
+              "--url.\n"
+              "Find it at https://www.xbox.com/play/consoles -- pick your "
+              "console and copy\nthe ID from the URL: "
+              "https://play.xbox.com/remoteplay/<THIS_PART>")
+        return 1
 
     if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
         os.environ.setdefault("WAYLAND_DISPLAY", "wayland-0")

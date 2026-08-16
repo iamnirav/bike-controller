@@ -1,3 +1,6 @@
+# Generated into udev/99-bike-controller.rules by install.sh, which fills in
+# @VENDOR@ and @PRODUCT@ from the controller attached at install time.
+#
 # Hide the physical controller from browsers and games.
 #
 # tools/bridge.py grabs the controller exclusively (EVIOCGRAB) and re-presents
@@ -9,14 +12,8 @@
 # Chromium only checks whether ID_INPUT_JOYSTICK is PRESENT, not its value, so
 # setting it to "0" would not help; the property has to be removed outright.
 #
-# Matches the 8BitDo Ultimate 2 Wireless Controller. For a different pad, get
-# its ids from:  udevadm info -a --name=/dev/input/jsN | grep id/
-#
-# Install:
-#   sudo cp udev/99-bike-controller.rules /etc/udev/rules.d/
-#   sudo udevadm control --reload-rules && sudo udevadm trigger -s input
-#
-# Uninstall (to use the controller directly in a browser again):
+# Side effect: the controller is invisible to browsers whenever the bridge is
+# not running. To undo:
 #   sudo rm /etc/udev/rules.d/99-bike-controller.rules
 #   sudo udevadm control --reload-rules && sudo udevadm trigger -s input
-SUBSYSTEM=="input", ATTRS{id/vendor}=="2dc8", ATTRS{id/product}=="310b", ENV{ID_INPUT_JOYSTICK}=""
+SUBSYSTEM=="input", ATTRS{id/vendor}=="@VENDOR@", ATTRS{id/product}=="@PRODUCT@", ENV{ID_INPUT_JOYSTICK}=""

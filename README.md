@@ -25,17 +25,41 @@ Status: **working end to end.** Verified against a real console and a real Xbox,
 and field-tested playing Helldivers 2 — the gate catches reliably even at fairly
 low cadence, so the 40/25 rpm thresholds do not force you to sprint to move.
 
-### This deployment
+### Known-working hardware
 
 | | |
 |---|---|
 | Bike | NordicTrack G/GX LE, model NTEX99025 |
-| Console | `54801-VV`, firmware `22017.0908`, BLE name `I_EB` |
-| Bike MAC (from Linux) | `E5:AD:49:06:75:76` |
-| Pi | `pi-2`, Raspberry Pi 5, Debian 12, kernel 6.12 |
-| Controller | 8BitDo Ultimate 2 Wireless, USB, X-input mode (`2dc8:310b`) |
+| Console | `54801-VV`, firmware `22017.0908`, advertises as `I_EB` |
+| Host | Raspberry Pi 5, Debian 12, kernel 6.12 |
+| Controller | 8BitDo Ultimate 2 Wireless, USB, X-input mode |
+
+Other Icon consoles (NordicTrack, ProForm, FreeMotion) that advertise as `I_EB`
+or `I_SB` are likely to work — `tools/probe_bike.py` tries three known poll
+variants and prints a byte-movement table so you can confirm the field offsets
+on yours. Any evdev gamepad works; nothing assumes 8BitDo.
 
 ---
+
+## Install
+
+On the Pi:
+
+```bash
+git clone <this-repo> && cd bike-controller
+./install.sh
+```
+
+It derives almost everything: paths from wherever you cloned it, the desktop user
+from who owns the checkout, the controller's USB IDs from whatever is plugged in.
+It will ask for your Xbox console ID — find it at
+`https://www.xbox.com/play/consoles`, pick your console, and copy the ID out of
+the URL. Everything else lives in `config.env` (created from
+`config.env.example`) and every value there is optional.
+
+```bash
+sudo systemctl enable --now bike-bridge
+```
 
 ## Day-to-day use
 
@@ -52,7 +76,7 @@ Three short pulses means the launch failed; see
 The bridge runs as a systemd service on the Pi:
 
 ```bash
-ssh pi-2
+ssh <your-pi>
 sudo systemctl start bike-bridge          # start
 sudo journalctl -u bike-bridge -f         # watch
 sudo systemctl stop bike-bridge           # stop
@@ -345,7 +369,7 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
-| `--poll-interval` | 0.2 | seconds between BLE poll writes; lower = fresher telemetry |
+| `--poll-interval` | 0.05 | seconds between BLE poll writes; lower = fresher telemetry |
 | `--no-rumble` | off | disable haptic cues on the physical controller |
 | `--rumble-passthrough` | off | forward the game's own rumble to your controller |
 | `--launch-on-input` | — | command to run on the launch trigger (see below) |
@@ -395,7 +419,7 @@ hypothesis; that table is how you confirm them against *your* console.
 **Cannot reach the Pi over SSH.** Its DHCP lease changes when it is unplugged
 and moved, and the old address may get handed to another device (which gives a
 confusing "connection refused" rather than a timeout). Use the mDNS name
-`pi-2.local` rather than a hard-coded IP.
+`<your-pi>.local` rather than a hard-coded IP.
 
 **Bike not found.** In order of likelihood: (1) the iFit app on a phone or tablet
 is holding the connection — these consoles accept exactly one at a time, force-quit
@@ -561,7 +585,7 @@ tools/deploy.sh               # sync, run tests on the Pi, restart the bridge
 tools/deploy.sh --no-restart  # sync only
 ```
 
-The Pi is `ssh pi-2`, resolved by **mDNS** rather than a fixed IP; its DHCP lease
+The Pi is `ssh <your-pi>`, resolved by **mDNS** rather than a fixed IP; its DHCP lease
 moves whenever it is unplugged.
 
 ### Tests
@@ -585,8 +609,10 @@ no log, no buzz.
 
 ### Configuration
 
-Runtime settings are command-line flags in the systemd unit's `ExecStart`, not a
-config file. Change thresholds there and deploy.
+Tuning lives in **`config.env`** — edit and `systemctl restart bike-bridge`. No
+`daemon-reload`, and no editing a systemd unit to change how hard you have to
+pedal. `tools/run-bridge.sh` turns those values into the flags below; anything
+not in `config.env` can still be passed directly for one-off experiments.
 
 ### Traps already hit
 
@@ -610,22 +636,21 @@ config file. Change thresholds there and deploy.
 - **A cheap screen or a phone tap** if the Konami launcher ever proves flaky;
   today it is the only way to start Remote Play without VNC.
 
-## Install on a fresh Pi
+## What install.sh does
 
-```bash
-sudo apt-get install -y python3-evdev
-python3 -m venv --system-site-packages .venv
-./.venv/bin/pip install bleak websockets
+Everything below is automated; it is here so you know what was changed on your
+machine, and so you can undo it.
 
-echo -e "uinput\njoydev" | sudo tee /etc/modules-load.d/bike-controller.conf
-sudo modprobe uinput joydev
+- `apt install python3-evdev python3-venv`; creates `.venv --system-site-packages`
+- Loads `uinput` and `joydev`, persisted via `/etc/modules-load.d/`. **`joydev`
+  is the one not loaded by default on Pi OS**, and without it the virtual pad
+  exists but stays invisible to the browser.
+- Generates `udev/99-bike-controller.rules` from the template with your
+  controller's USB IDs, and installs it
+- Generates `systemd/bike-bridge.service` from the template with your checkout
+  path, and installs it
+- Creates `config.env` and prompts for the console ID
 
-sudo cp udev/99-bike-controller.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger -s input
+The generated unit and udev rule are gitignored: they belong to your machine, not
+to the repo.
 
-sudo cp systemd/bike-bridge.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl start bike-bridge
-```
-
-Edit the controller IDs in the udev rule and the bike address in the unit file
-to match your hardware.

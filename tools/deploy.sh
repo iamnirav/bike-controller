@@ -5,7 +5,11 @@
 # edited directly on the Pi is silently overwritten by the next run.
 set -euo pipefail
 
-HOST="${BIKE_PI_HOST:-pi-2}"
+HERE_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+[ -f "$HERE_EARLY/config.env" ] && . "$HERE_EARLY/config.env"
+
+HOST="${BIKE_PI_HOST:-${PI_HOST:-raspberrypi.local}}"
 REMOTE="${BIKE_PI_PATH:-bike-controller}"
 RESTART=1
 [ "${1:-}" = "--no-restart" ] && RESTART=0
@@ -18,9 +22,16 @@ echo "==> mutation testing (local)"
 python3 "$HERE/tools/mutate.py" | tail -3
 
 echo "==> syncing $HERE -> $HOST:$REMOTE"
+# config.env is EXCLUDED deliberately: it holds the Pi's own console ID and
+# tuning, and --delete would otherwise remove it on every deploy. The generated
+# unit and udev rule are excluded for the same reason -- they belong to the Pi,
+# not to this checkout.
 rsync -az --delete \
       --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
       --exclude 'probe-*.txt' --exclude 'scan-*.txt' \
+      --exclude 'config.env' --exclude 'rides' --exclude 'ride-*.csv' \
+      --exclude 'systemd/bike-bridge.service' \
+      --exclude 'udev/99-bike-controller.rules' \
       "$HERE/" "$HOST:$REMOTE/"
 
 echo "==> running tests on the Pi"
@@ -53,7 +64,7 @@ if [ "$RESTART" -eq 1 ]; then
     # browser rather than merely going quiet) and ride logging.
     echo "==> smoke run (must survive 8s, with FF and ride log)"
     ssh -n "$HOST" "sudo systemctl stop bike-bridge 2>/dev/null; \
-        rm -rf /tmp/smoke-rides; \
+        sudo rm -rf /tmp/smoke-rides; \
         cd $REMOTE && sudo timeout 8 ./.venv/bin/python -u tools/bridge.py \
             --simulate-bike --no-controller --movement power \
             --rumble-passthrough --ride-log /tmp/smoke-rides >/tmp/smoke.log 2>&1; \
@@ -70,7 +81,12 @@ if [ "$RESTART" -eq 1 ]; then
         echo '    survived; force feedback up; ride log written'"
 
     echo "==> installing unit and restarting"
-    ssh -n "$HOST" "sudo cp $REMOTE/systemd/bike-bridge.service /etc/systemd/system/ && \
+    # Regenerate the unit from the template on the Pi, so a template change
+    # reaches the running service without re-running install.sh.
+    ssh -n "$HOST" "cd $REMOTE && \
+                    sed \"s|@REPO@|\$PWD|g\" systemd/bike-bridge.service.template \
+                      > systemd/bike-bridge.service && \
+                    sudo cp systemd/bike-bridge.service /etc/systemd/system/ && \
                     sudo systemctl daemon-reload && \
                     sudo systemctl restart bike-bridge && sleep 12 && \
                     sudo journalctl -u bike-bridge --no-pager -o cat --since '-15s' \

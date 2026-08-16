@@ -72,6 +72,7 @@ class Status:
     gate: bool = False
     move: float = 1.0
     sprint: bool = False
+    game_rumble_seen: bool = False
 
 
 class ControllerHolder:
@@ -501,8 +502,20 @@ async def output_loop(
         # Serviced every frame: an unanswered FF upload leaves the BROWSER
         # blocked in its ioctl, so this is not optional once the pad advertises
         # force feedback.
-        for strong, weak in pad.poll_rumble():
-            holder.rumble_raw(strong, weak)
+        rumbles = pad.poll_rumble()
+        if rumbles:
+            # Say so the first time. Whether Remote Play's web client forwards
+            # game rumble to the Gamepad API at all is the one link in this
+            # chain that cannot be tested without a game running, so make it
+            # observable instead of a matter of feel.
+            if not status.game_rumble_seen:
+                status.game_rumble_seen = True
+                print("  game rumble received -- passthrough is working end to end",
+                      flush=True)
+            # Coalesce: several effects can arrive in one drain, but the pad has
+            # one pair of motors and only the strongest is audible.
+            holder.rumble_raw(max(s for s, _ in rumbles),
+                              max(w for _, w in rumbles))
 
         pad.sync()
         # Pinged from HERE, not from a timer: the point is to attest that frames

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -77,10 +78,17 @@ def describe(name: str, values: list[float], unit: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", help="CSV files, or a directory")
-    parser.add_argument("--movement-max", type=float, default=75.0,
-                        help="current setting, for comparison")
-    parser.add_argument("--sprint-at", type=float, default=100.0,
-                        help="current setting, for comparison")
+    # Defaults read from config.env's values rather than copied from the
+    # systemd unit -- a second hardcoded copy of your calibration would drift
+    # from the first the moment you tuned anything.
+    parser.add_argument("--movement-max", type=float,
+                        default=float(os.environ.get("MOVEMENT_MAX", 75)),
+                        help="current setting, for comparison "
+                             "(defaults to $MOVEMENT_MAX)")
+    parser.add_argument("--sprint-at", type=float,
+                        default=float(os.environ.get("SPRINT_AT", 100)),
+                        help="current setting, for comparison "
+                             "(defaults to $SPRINT_AT)")
     args = parser.parse_args()
 
     files: list[Path] = []
