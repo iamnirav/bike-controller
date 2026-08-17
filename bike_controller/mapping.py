@@ -239,19 +239,22 @@ class Mapper:
         self._cadence_raw = cadence_rpm
         self._power_raw = power_w
 
-        # Freeze detection. Distance is the discriminator: a steady rider can
-        # genuinely hold the same integer cadence (and therefore the same
-        # derived power) for seconds, but the console's own accumulator keeps
-        # climbing while the crank turns. All three identical means it is
-        # repeating itself, not reporting.
+        # Freeze detection. Distance is the discriminator and effectively the
+        # only one: at fixed resistance the console derives power from cadence
+        # (watts = 2 * (rpm - 25)), so those two are one signal, not two. The
+        # accumulator is independent and climbs on essentially every sample
+        # while the crank turns -- measured at 5-8 units per sample across
+        # 55-81 rpm. Its reset-to-0 on stopping and its uint16 wrap are both
+        # CHANGES, so neither can cause a false positive.
+        #
+        # Consequence worth knowing: a partial freeze -- distance latched while
+        # cadence jitters 50/51 -- would evade this.
         reading = (cadence_rpm, power_w, distance)
         self._have_distance = distance is not None
         if reading != self._last_reading:
             self._last_reading = reading
             self._reading_changed_at = now
             self._frozen_reported = False
-        elif self._reading_changed_at is None:
-            self._reading_changed_at = now
 
         self.tracker.submit(cadence_rpm, now)
 
@@ -266,6 +269,12 @@ class Mapper:
         # stopping a real rider is the worse error. Also disabled by setting
         # frozen_after to 0.
         if not self._have_distance or self.config.frozen_after <= 0:
+            return False
+        # A dead link satisfies every condition below -- _cadence_raw and
+        # _have_distance are sticky, and _reading_changed_at keeps ageing during
+        # silence. Reporting that as a frozen CONSOLE would send the next person
+        # debugging the journal after a bike fault that was a radio fault.
+        if self.tracker.is_stale(now):
             return False
         if self._cadence_raw <= 0 or self._reading_changed_at is None:
             return False
@@ -347,7 +356,7 @@ class Mapper:
             self._frozen_reported = True
             print(f"  console telemetry frozen at cadence={self._cadence_raw:.0f} "
                   f"power={self._power_raw:.0f} for >"
-                  f"{self.config.frozen_after:.0f}s -- treating as stopped",
+                  f"{self.config.frozen_after:.1f}s -- treating as stopped",
                   flush=True)
         # Frozen counts as stale: frames are arriving, but they carry nothing.
         stale = self.tracker.is_stale(now) or frozen

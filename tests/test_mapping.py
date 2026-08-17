@@ -496,6 +496,65 @@ def test_freeze_detection_needs_distance():
     assert mapper.evaluate(now=t).movement_scale > 0.5
 
 
+def test_freeze_guard_can_be_switched_off():
+    """FROZEN_AFTER=0 is documented as the kill switch, in config and the
+    banner. Nothing tested it, so the comparison could silently invert."""
+    movement = MovementConfig(enabled=True, source="power",
+                              min_value=0.0, max_value=130.0)
+    mapper = Mapper(MappingConfig(movement=movement, frozen_after=0))
+    t = 0.0
+    for _ in range(40):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=157)   # frozen solid
+    assert not mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale > 0.5
+
+
+def test_an_idle_bike_is_not_frozen():
+    """A stopped bike repeats (0, 0, 0) forever. Without the cadence check that
+    is a freeze, and it would log and re-log every time you sit still."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for _ in range(40):
+        t += 0.5
+        mapper.submit(0.0, 0.0, now=t, distance=0)
+    assert not mapper.is_frozen(now=t)
+
+
+def test_a_dead_link_is_not_reported_as_a_frozen_console():
+    """Silence is the staleness check's job. _cadence_raw and the distance flag
+    are sticky, so without an explicit guard a plain BLE dropout satisfies every
+    freeze condition -- and the one log line that means "frames arrived carrying
+    dead data" would fire when no frames arrived at all."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for i in range(10):
+        t += 0.5
+        mapper.submit(70.0, 90.0, now=t, distance=100 + i * 3)
+    silent = t + mapper.tracker.stale_after + 5.0
+    assert mapper.tracker.is_stale(silent)
+    assert not mapper.is_frozen(silent), "a dead link was blamed on the console"
+    assert mapper.evaluate(now=silent).movement_scale == 0.0   # still zeroed
+
+
+def test_movement_returns_when_the_console_unfreezes():
+    mapper = make_movement_mapper()
+    t = 0.0
+    for i in range(10):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+    for _ in range(20):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=127)
+    assert mapper.evaluate(now=t).movement_scale == 0.0
+
+    for i in range(4):                       # console starts reporting again
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=130 + i * 3)
+    assert not mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale > 0.5, "never recovered"
+
+
 def test_gate_disabled_always_passes():
     mapper = Mapper(MappingConfig(gate=GateConfig(enabled=False)))
     assert mapper.evaluate(now=0.0).gate_open is True

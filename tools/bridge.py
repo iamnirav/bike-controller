@@ -39,7 +39,11 @@ from bike_controller.gamepad import (                                # noqa: E40
     VirtualGamepad,
 )
 from bike_controller.ridelog import RideLogger                 # noqa: E402
-from bike_controller.sequence import SequenceDetector          # noqa: E402
+from bike_controller.sequence import (                          # noqa: E402
+    EventCodes,
+    SequenceDetector,
+    Tokenizer,
+)
 from bike_controller.watchdog import Watchdog                  # noqa: E402
 from bike_controller.mapping import (                                # noqa: E402
     AxisConfig,
@@ -52,6 +56,15 @@ from bike_controller.mapping import (                                # noqa: E40
 )
 
 LEFT_STICK = (e.ABS_X, e.ABS_Y)
+
+# evdev's numbers, handed to the (evdev-free) tokenizer so it stays testable
+# without a Linux gamepad stack. A stick-direction bug shipped unnoticed
+# precisely because that code used to live here, where nothing could test it.
+EVENT_CODES = EventCodes(
+    ev_key=e.EV_KEY, ev_abs=e.EV_ABS, ev_syn=e.EV_SYN,
+    abs_x=e.ABS_X, abs_y=e.ABS_Y,
+    abs_hat_x=e.ABS_HAT0X, abs_hat_y=e.ABS_HAT0Y,
+)
 
 
 @dataclasses.dataclass
@@ -75,6 +88,7 @@ class Status:
     game_rumble_seen: bool = False
     frames: int = 0                     # telemetry frames since start
     resistance: int = 0                 # raw byte, not the console's displayed level
+    frozen: bool = False                # console repeating one reading
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -186,49 +200,6 @@ KONAMI = [
 ]
 
 
-# A stick is analog, so a direction has to be a THRESHOLD crossing rather than a
-# value. 60% of full deflection is well clear of any drift and of a diagonal.
-STICK_THRESHOLD = 0.60 * 32767
-
-
-class Tokenizer:
-    """Reduce evdev events to comparable tokens for the sequence detector.
-
-    Accepts the left stick as well as the d-pad for directions. Nobody entering
-    the Konami code thinks about which one they are holding, and a stick push
-    arrives as ABS_X/ABS_Y, which produced no token at all -- so the sequence
-    silently never matched.
-
-    Stick directions are edge-triggered: held past the threshold they fire once,
-    and must fall back below it before firing again. Without that, one shove
-    would emit a token per event and instantly reset the match.
-    """
-
-    def __init__(self) -> None:
-        self._stick = {e.ABS_X: 0, e.ABS_Y: 0}      # -1, 0, +1
-
-    def token(self, event) -> tuple | None:
-        if event.type == e.EV_KEY and event.value == 1:
-            return ("btn", event.code)
-        if event.type != e.EV_ABS:
-            return None
-        if event.code == e.ABS_HAT0Y and event.value != 0:
-            return ("hat_y", 1 if event.value > 0 else -1)
-        if event.code == e.ABS_HAT0X and event.value != 0:
-            return ("hat_x", 1 if event.value > 0 else -1)
-        if event.code in self._stick:
-            if event.value > STICK_THRESHOLD:
-                direction = 1
-            elif event.value < -STICK_THRESHOLD:
-                direction = -1
-            else:
-                direction = 0
-            previous, self._stick[event.code] = self._stick[event.code], direction
-            if direction and direction != previous:
-                return ("hat_y" if event.code == e.ABS_Y else "hat_x", direction)
-        return None
-
-
 class Launcher:
     """Runs a command when the rider first touches the controller.
 
@@ -322,13 +293,6 @@ class Launcher:
         if self._task is not None and not self._task.done():
             return
         self._last_attempt = now
-
-        # Acknowledge RECOGNITION, not launching. The buzz answers "did it hear
-        # me?", which is the only question the rider can ask from the saddle.
-        # Firing it only on launch meant that declining -- the common case once
-        # a browser is already up -- was silent and indistinguishable from the
-        # code not registering at all.
-        self.rumble("ack")
 
         # Cheap process check, gated by the cooldown so a held button does not
         # spawn a pgrep per frame.
@@ -495,8 +459,11 @@ async def feed_from_controller(
     unplugged. `holder.reader` is None whenever we have no controller, and
     the output loop treats that as "emit nothing".
     """
-    tokenizer = Tokenizer()
     while True:
+        # Rebuilt per acquisition: a pad unplugged with the stick deflected
+        # would otherwise leave the edge state latched, swallowing the first
+        # push on its replacement.
+        tokenizer = Tokenizer(EVENT_CODES)
         reader = None
         try:
             path = path_arg or ControllerReader.find()
@@ -525,12 +492,18 @@ async def feed_from_controller(
                     continue
                 was = detector.index
                 if detector.feed(token):
+                    # Ack RECOGNITION, here, where it happens. The buzz answers
+                    # "did it hear me?" -- the only question a rider can ask
+                    # from the saddle -- and must fire even when trigger()
+                    # declines because a browser is already running, which is
+                    # the common case.
                     print("  konami code entered", flush=True)
+                    holder.rumble("ack")
                     launcher.trigger()
-                elif was >= 3 and detector.index < was:
-                    # Losing a half-entered sequence is invisible otherwise, and
-                    # "I entered it and nothing happened" is unfalsifiable
-                    # without knowing how far it got.
+                elif was >= 1 and detector.index < was:
+                    # From step 1, not 3: the failure that actually happens is
+                    # a spurious perpendicular token on the FIRST push, which a
+                    # threshold of 3 could never report.
                     print(f"  konami progress lost at step {was}/"
                           f"{len(detector.sequence)} (got {token}, "
                           f"expected {detector.sequence[was]})", flush=True)
@@ -572,6 +545,7 @@ async def output_loop(
         status.gate = out.gate_open
         status.cadence = out.cadence
         status.move = out.movement_scale
+        status.frozen = mapper.is_frozen(now)
         status.sprint = out.sprint
         # Take power from the same evaluate() that produced `move`, not from the
         # feed task -- otherwise the two can be a sample apart and the status
@@ -681,7 +655,8 @@ async def status_loop(status: Status, stop: asyncio.Event) -> None:
             f"  bike={status.bike:<10} age={age} "
             f"ctrl={status.controller[:22]:<22} "
             f"cadence={status.cadence:5.1f} (raw {status.cadence_raw:>3}) "
-            f"gate={'OPEN' if status.gate else 'shut'} "
+            f"gate={'OPEN' if status.gate else 'shut'}"
+            f"{' FROZEN' if status.frozen else ''} "
             f"{hz:4.1f}Hz "
             f"pwr={status.power:4.0f} res={status.resistance:2d} "
             f"move={status.move:4.2f}"
@@ -788,6 +763,12 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"--movement-min ({args.movement_min})")
     if not 0.0 <= args.movement_floor < 1.0:
         parser.error("--movement-floor must be in [0.0, 1.0)")
+    if args.frozen_after < 0 or 0 < args.frozen_after < 2.5:
+        parser.error(
+            f"--frozen-after ({args.frozen_after}) must be 0 (disabled) or at "
+            "least 2.5. The console legitimately holds its last reading for "
+            "about 2s at the end of every pedalling stretch, so anything "
+            "shorter zeroes movement every time you stop.")
     if not 5.0 <= args.frame_rate <= 1000.0:
         parser.error(
             f"--frame-rate ({args.frame_rate}) must be between 5 and 1000. "
@@ -910,7 +891,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     print(f"Fail-safe: input zeroes after "
           f"{mapper.tracker.stale_after:.2f}s without telemetry")
     print(f"Freeze guard: "
-          f"{f'{args.frozen_after:.0f}s' if args.frozen_after > 0 else 'off'}")
+          f"{f'{args.frozen_after:.1f}s' if args.frozen_after > 0 else 'off'}")
     print(f"Ride log: {args.ride_log or 'off'}")
     print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")

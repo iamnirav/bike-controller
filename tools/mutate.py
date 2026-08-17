@@ -80,6 +80,27 @@ MUTANTS = [
      "            else:\n                self._socket = sock\n"
      "            self._socket = self._socket or socket.socket("
      "socket.AF_UNIX, socket.SOCK_DGRAM)"),
+    ("bike_controller/mapping.py", "frozen console still drives movement",
+     "        stale = self.tracker.is_stale(now) or frozen",
+     "        stale = self.tracker.is_stale(now)"),
+    ("bike_controller/mapping.py", "freeze kill switch inverted",
+     "        if not self._have_distance or self.config.frozen_after <= 0:",
+     "        if not self._have_distance or self.config.frozen_after < 0:"),
+    ("bike_controller/mapping.py", "idle bike counts as frozen",
+     "        if self._cadence_raw <= 0 or self._reading_changed_at is None:",
+     "        if self._reading_changed_at is None:"),
+    ("bike_controller/mapping.py", "dead link blamed on the console",
+     "        if self.tracker.is_stale(now):\n            return False",
+     "        if False:\n            return False"),
+    ("bike_controller/mapping.py", "distance dropped from the freeze tuple",
+     "        reading = (cadence_rpm, power_w, distance)",
+     "        reading = (cadence_rpm, power_w)"),
+    ("bike_controller/sequence.py", "stick ignores axis dominance",
+     "        if abs(x) > abs(y) and abs(x) > STICK_THRESHOLD:",
+     "        if abs(x) > STICK_THRESHOLD:"),
+    ("bike_controller/sequence.py", "held stick re-fires its token",
+     "        if direction != previous:",
+     "        if direction:"),
     # NOTE: uinput_ff.py's upload/erase handshake is deliberately NOT mutated
     # here. Exercising it needs a real /dev/uinput and a kernel, which this
     # harness does not have -- a mutant that can never be killed is noise, not
