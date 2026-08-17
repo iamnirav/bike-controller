@@ -73,6 +73,7 @@ class Status:
     move: float = 1.0
     sprint: bool = False
     game_rumble_seen: bool = False
+    frames: int = 0                     # telemetry frames since start
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -340,6 +341,7 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
                     status.bike_seen = time.monotonic()
+                    status.frames += 1
                     mapper.submit(sample.cadence_rpm, sample.power_w)
                     # Handed to the output loop rather than logged here, so the
                     # row's derived values match its raw ones. Calling
@@ -561,8 +563,15 @@ async def output_loop(
 
 
 async def status_loop(status: Status, stop: asyncio.Event) -> None:
+    # Telemetry rate measured over the last interval. `age` only ever hinted at
+    # this, and the difference between the bridge's rate and pure polling is
+    # exactly the lag a rider feels.
+    last_frames, last_at = status.frames, time.monotonic()
     while not stop.is_set():
         await asyncio.sleep(1.0)
+        now = time.monotonic()
+        hz = (status.frames - last_frames) / max(1e-6, now - last_at)
+        last_frames, last_at = status.frames, now
         age = (f"{time.monotonic() - status.bike_seen:4.1f}s"
                if status.bike_seen else "  -- ")
         print(
@@ -570,6 +579,7 @@ async def status_loop(status: Status, stop: asyncio.Event) -> None:
             f"ctrl={status.controller[:22]:<22} "
             f"cadence={status.cadence:5.1f} (raw {status.cadence_raw:>3}) "
             f"gate={'OPEN' if status.gate else 'shut'} "
+            f"{hz:4.1f}Hz "
             f"pwr={status.power:4.0f} move={status.move:4.2f}"
             f"{' SPRINT' if status.sprint else ''}",
             flush=True,
