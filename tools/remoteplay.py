@@ -113,6 +113,16 @@ def wait_for_cdp(port: int, timeout: float) -> list[dict] | None:
     return None
 
 
+def kill_chromium() -> None:
+    """Stop every Chromium process and wait for the port to free up.
+
+    No -x: /proc/<pid>/comm is capped at 15 chars, so "chromium-browser"
+    appears as "chromium-browse" and an exact match would miss it.
+    """
+    subprocess.run(["pkill", "chromium"], capture_output=True)
+    time.sleep(2.0)
+
+
 def launch_chromium(url: str, port: int) -> subprocess.Popen | None:
     binary = shutil.which("chromium") or shutil.which("chromium-browser")
     if binary is None:
@@ -252,8 +262,13 @@ async def main() -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--dry-run", action="store_true",
                         help="report whether the button is there, but do not click")
-    parser.add_argument("--timeout", type=float, default=240.0,
-                        help="seconds to wait for the button")
+    parser.add_argument("--attempt-timeout", type=float, default=75.0,
+                        help="seconds to wait per browser launch before "
+                             "restarting it (default 75)")
+    parser.add_argument("--attempts", type=int, default=3,
+                        help="how many times to relaunch the browser (default 3). "
+                             "A stalled Remote Play page is not fixed by "
+                             "reloading, only by a fresh browser process.")
     parser.add_argument("--no-launch", action="store_true",
                         help="attach to an already-running Chromium")
     args = parser.parse_args()
@@ -271,28 +286,47 @@ async def main() -> int:
         os.environ.setdefault("WAYLAND_DISPLAY", "wayland-0")
         os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 
-    if not args.no_launch and launch_chromium(args.url, args.port) is None:
-        # Otherwise we wait 30s and then blame a stale Chromium instance, which
-        # is actively misleading when the binary simply is not installed.
-        return 1
+    # Remote Play can wedge on "Warming things up for you..." and stay there.
+    # Reloading the page does NOT clear it -- only a fresh browser process does,
+    # so a stall means relaunch rather than keep polling a dead page.
+    for attempt in range(1, args.attempts + 1):
+        if not args.no_launch:
+            if attempt > 1:
+                print(f"\n=== attempt {attempt}/{args.attempts}: restarting Chromium ===")
+            kill_chromium()
+            if launch_chromium(args.url, args.port) is None:
+                # Otherwise we wait 30s and then blame a stale Chromium
+                # instance, misleading when the binary is simply not installed.
+                return 1
 
-    targets = wait_for_cdp(args.port, timeout=30.0)
-    if targets is None:
-        print(f"Chromium's debug port {args.port} never opened.")
-        print("If Chromium was already running WITHOUT --remote-debugging-port, "
-              "close it first: pkill chromium")
-        return 1
+        targets = wait_for_cdp(args.port, timeout=30.0)
+        if targets is None:
+            print(f"Chromium's debug port {args.port} never opened.")
+            print("If Chromium was already running WITHOUT "
+                  "--remote-debugging-port, close it first: pkill chromium")
+            return 1
 
-    page = next((t for t in targets
-                 if t.get("type") == "page" and "remoteplay" in t.get("url", "")), None)
-    if page is None:
-        page = next((t for t in targets if t.get("type") == "page"), None)
-    if page is None:
-        print("no page target found in Chromium")
-        return 1
+        page = next((t for t in targets
+                     if t.get("type") == "page" and "remoteplay" in t.get("url", "")), None)
+        if page is None:
+            page = next((t for t in targets if t.get("type") == "page"), None)
+        if page is None:
+            print("no page target found in Chromium")
+            return 1
 
-    print(f"attached to: {page.get('url','')[:80]}")
-    return await drive(page["webSocketDebuggerUrl"], args.dry_run, args.timeout)
+        print(f"attached to: {page.get('url','')[:80]}")
+        try:
+            result = await drive(page["webSocketDebuggerUrl"], args.dry_run,
+                                 args.attempt_timeout)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"  attach failed ({type(exc).__name__}: {exc})")
+            result = 1
+        if result == 0 or args.dry_run or args.no_launch:
+            return result
+
+    print(f"\nGave up after {args.attempts} browser restarts. The console may be "
+          f"off or asleep;\nRemote Play cannot wake one in energy-saving mode.")
+    return 1
 
 
 if __name__ == "__main__":
