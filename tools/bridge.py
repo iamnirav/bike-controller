@@ -276,9 +276,7 @@ class Launcher:
 
     async def _run(self) -> None:
         assert self.command is not None
-        # Immediate acknowledgement: the launch takes tens of seconds, and
-        # without this you cannot tell whether the code registered.
-        self.rumble("ack")
+        # The ack already fired in trigger(), on recognition.
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.command, stdout=asyncio.subprocess.DEVNULL,
@@ -323,9 +321,19 @@ class Launcher:
         if self._task is not None and not self._task.done():
             return
         self._last_attempt = now
+
+        # Acknowledge RECOGNITION, not launching. The buzz answers "did it hear
+        # me?", which is the only question the rider can ask from the saddle.
+        # Firing it only on launch meant that declining -- the common case once
+        # a browser is already up -- was silent and indistinguishable from the
+        # code not registering at all.
+        self.rumble("ack")
+
         # Cheap process check, gated by the cooldown so a held button does not
         # spawn a pgrep per frame.
         if self._browser_running():
+            print("  konami code entered, but a browser is already running -- "
+                  "nothing to launch", flush=True)
             return
         self.launches += 1
         print("  controller input with no browser running -> launching Remote Play",
