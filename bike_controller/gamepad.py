@@ -79,6 +79,9 @@ class VirtualGamepad:
             self.path = self.ui.device.path
         self._buttons: dict[int, int] = {code: 0 for code in BUTTONS}
         self._axes: dict[int, int] = {code: 0 for code in AXES}
+        # What the kernel has actually been told, so sync() can send deltas.
+        self._sent_buttons: dict[int, int] = {}
+        self._sent_axes: dict[int, int] = {}
 
     @staticmethod
     def _find_path() -> str | None:
@@ -133,12 +136,28 @@ class VirtualGamepad:
             self._axes[code] = 0
 
     def sync(self) -> None:
+        """Emit only what changed since the last frame.
+
+        Writing all 19 controls every frame is ~1200 syscalls a second at 60 Hz,
+        for output the kernel then discards -- input_handle_event drops
+        unchanged EV_KEY/EV_ABS values and suppresses the resulting empty SYN.
+        Behaviour is identical either way; the difference is that the event loop
+        driving BLE polling is not spending its time on it.
+        """
         writer = self.ff if self.ff is not None else self.ui
+        changed = False
         for code, value in self._buttons.items():
-            writer.write(e.EV_KEY, code, value)
+            if self._sent_buttons.get(code) != value:
+                writer.write(e.EV_KEY, code, value)
+                self._sent_buttons[code] = value
+                changed = True
         for code, value in self._axes.items():
-            writer.write(e.EV_ABS, code, value)
-        writer.syn()
+            if self._sent_axes.get(code) != value:
+                writer.write(e.EV_ABS, code, value)
+                self._sent_axes[code] = value
+                changed = True
+        if changed:
+            writer.syn()
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
