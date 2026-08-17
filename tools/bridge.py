@@ -538,6 +538,7 @@ async def output_loop(
     # not buzz continuously.
     prev_max = False
     prev_sprint = False
+    prev_degraded = False
     last_rumble = 0.0
     while not stop.is_set():
         now = time.monotonic()
@@ -593,7 +594,10 @@ async def output_loop(
                 holder.rumble("max_on")
             if out.sprint and not prev_sprint:
                 holder.rumble("sprint_on")
-        prev_max, prev_sprint = out.at_max, out.sprint
+            # Rising edge only: one buzz when the bike goes away, not a stream.
+            if out.degraded and not prev_degraded:
+                holder.rumble("fault")
+        prev_max, prev_sprint, prev_degraded = out.at_max, out.sprint, out.degraded
 
         # Serviced every frame: an unanswered FF upload leaves the BROWSER
         # blocked in its ioctl, so this is not optional once the pad advertises
@@ -692,8 +696,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "deadzone (typically 12-24%%) be the threshold")
     parser.add_argument("--movement-max", type=float, default=100.0,
                         help="effort giving full stick deflection (watts or rpm)")
-    parser.add_argument("--movement-floor", type=float, default=0.0,
-                        help="minimum scale once above --movement-min (0 = pure scaling)")
+    parser.add_argument("--movement-floor", type=float, default=0.25,
+                        help="baseline multiplier you always have, at any effort "
+                             "including none (default 0.25). 0 = strict "
+                             "pedal-or-nothing.")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")
     parser.add_argument("--sprint-button", default="BTN_THUMBL",

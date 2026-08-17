@@ -145,7 +145,7 @@ class MovementConfig:
     # This is what makes bike-side faults degrade instead of strand you: the
     # console's restart delay, a freeze, or a dropped link all leave you moving
     # slowly rather than stuck. 0.0 restores strict pedal-or-nothing.
-    floor: float = 0.0
+    floor: float = 0.25
     sprint_at: float | None = None         # same units as `source`
     # Sprint releases below sprint_at * this. Without hysteresis, effort
     # fluctuating around the threshold makes the sprint button chatter on and
@@ -217,6 +217,9 @@ class MappingOutput:
     movement_scale: float = 1.0
     sprint: bool = False
     at_max: bool = False
+    # Telemetry is stale or the console is frozen. With a baseline set, a fault
+    # no longer stops the rider, so this is the only way they can learn of it.
+    degraded: bool = False
     power: float = 0.0
 
 
@@ -296,9 +299,17 @@ class Mapper:
         if stale:
             self._sprinting = False
             self._at_max = False
-            # Down to the baseline, not to zero: the baseline is what the
-            # CONTROLLER gives you, and the bike being unreachable should not
-            # take that away. With floor 0 this is the old hard stop.
+            # Down to the baseline, not to zero.
+            #
+            # The invariant that matters is that a BROKEN bike never grants more
+            # movement than a working one, and this preserves it exactly: a dead
+            # bike gives what a live bike gives at 0 W. It is safe to relax the
+            # hard stop because movement_scale multiplies the PHYSICAL stick --
+            # an unattended rig does not move, because 0 x 0.25 is still 0.
+            #
+            # The cost is that a fault no longer announces itself by stopping
+            # you; output_loop fires a haptic cue instead. With floor 0 this is
+            # the old hard stop.
             return movement.floor, False, False
 
         value = self._power_raw if movement.source == "power" else self._cadence_raw
@@ -373,6 +384,7 @@ class Mapper:
         out.gate_open = self._update_gate(cadence, now, stale)
         out.power = self._power_raw
         out.movement_scale, out.sprint, out.at_max = self._movement(stale)
+        out.degraded = stale
 
         axis = self.config.axis
         if axis.enabled:

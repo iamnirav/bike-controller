@@ -162,6 +162,22 @@ def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
     assert out.cadence == 0.0
 
 
+def test_the_freeze_guard_works_at_the_deployed_baseline():
+    """The guard was only ever tested at floor 0, which nobody runs."""
+    mapper = make_movement_mapper(max_value=75.0, floor=0.25)
+    t = 0.0
+    for i in range(10):
+        t += 0.5
+        mapper.submit(51.0, 60.0, now=t, distance=100 + i * 3)
+    assert mapper.evaluate(now=t).movement_scale > 0.8
+
+    for _ in range(20):                      # the observed 51rpm/60W latch
+        t += 0.5
+        mapper.submit(51.0, 60.0, now=t, distance=130)
+    assert mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale == 0.25
+
+
 def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
     """Mirrors the gate twin above -- must actually drive the deployed rate."""
     movement = MovementConfig(enabled=True, source="power",
@@ -173,7 +189,7 @@ def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
 
     out, _ = run(mapper, None, seconds=8.0, t0=t, feed=False,
                  telemetry_hz=DEPLOYED_HZ)
-    assert out.movement_scale == 0.0, "dead feed left the stick deflected"
+    assert out.movement_scale == mapper.config.movement.floor
 
 
 def test_dropped_frames_do_not_kill_movement_at_any_poll_rate():
@@ -337,8 +353,16 @@ def test_tracker_ignores_time_going_backwards():
 
 # --- movement scaling -------------------------------------------------------
 
+# Every fail-safe assertion below is written against the CONFIGURED floor, not
+# against 0. Asserting 0 only held in a configuration nobody runs: with the
+# deployed floor of 0.25, eight of these tests failed, so the staleness path and
+# the whole freeze guard were unverified in production settings.
+FLOORS = (0.0, 0.25)
+
+
 def make_movement_mapper(**kw) -> Mapper:
-    defaults = dict(enabled=True, source="power", min_value=0.0, max_value=130.0)
+    defaults = dict(enabled=True, source="power", min_value=0.0, max_value=130.0,
+                    floor=0.0)
     return Mapper(MappingConfig(movement=MovementConfig(**{**defaults, **kw})))
 
 
@@ -364,20 +388,23 @@ def test_movement_scale_is_not_smoothed():
     assert mapper.evaluate(now=2.0).movement_scale == 1.0
 
 
-def test_dead_feed_zeroes_movement_scale():
-    """Fail-safe: a stale link must not leave the stick deflected.
+def test_dead_feed_drops_to_the_baseline():
+    """Fail-safe: a stale link must never grant MORE than a working bike.
 
-    Without this, a dropped BLE connection freezes the stick at its last value
-    and walks the character into a wall indefinitely.
+    At floor 0 that is a hard stop. At a configured baseline it is that
+    baseline -- what a live bike gives at 0 W -- so a broken bike is never
+    better than a working one.
     """
-    mapper = make_movement_mapper()
-    mapper.submit(80.0, 120.0, now=1.0)
-    assert mapper.evaluate(now=1.0).movement_scale > 0.9
+    for floor in FLOORS:
+        mapper = make_movement_mapper(floor=floor)
+        mapper.submit(80.0, 120.0, now=1.0)
+        assert mapper.evaluate(now=1.0).movement_scale > 0.9
 
-    stale = 1.0 + mapper.tracker.stale_after + 0.1
-    out = mapper.evaluate(now=stale)
-    assert out.movement_scale == 0.0, "stale feed left the stick deflected"
-    assert out.sprint is False
+        stale = 1.0 + mapper.tracker.stale_after + 0.1
+        out = mapper.evaluate(now=stale)
+        assert out.movement_scale == floor, f"floor {floor}: got {out.movement_scale}"
+        assert out.sprint is False
+        assert out.degraded is True
 
 
 def test_the_baseline_applies_at_every_effort_including_none():
@@ -462,7 +489,7 @@ def test_movement_disabled_leaves_scale_at_one():
 
 def test_movement_can_be_driven_by_cadence():
     movement = MovementConfig(enabled=True, source="cadence",
-                              min_value=0.0, max_value=90.0)
+                              min_value=0.0, max_value=90.0, floor=0.0)
     mapper = Mapper(MappingConfig(movement=movement))
     mapper.submit(45.0, 999.0, now=1.0)
     assert abs(mapper.evaluate(now=1.0).movement_scale - 0.5) < 0.01
@@ -487,7 +514,7 @@ def test_frozen_console_is_treated_as_stopped():
         mapper.submit(60.0, 70.0, now=t, distance=157)
     assert t - frozen_at > mapper.config.frozen_after
     assert mapper.is_frozen(now=t)
-    assert mapper.evaluate(now=t).movement_scale == 0.0
+    assert mapper.evaluate(now=t).movement_scale == mapper.config.movement.floor
 
 
 def test_a_brief_repeat_is_not_a_freeze():
@@ -555,7 +582,8 @@ def test_a_dead_link_is_not_reported_as_a_frozen_console():
     silent = t + mapper.tracker.stale_after + 5.0
     assert mapper.tracker.is_stale(silent)
     assert not mapper.is_frozen(silent), "a dead link was blamed on the console"
-    assert mapper.evaluate(now=silent).movement_scale == 0.0   # still zeroed
+    # Still capped at the baseline; the guard changes the LOG, not the outcome.
+    assert mapper.evaluate(now=silent).movement_scale == mapper.config.movement.floor
 
 
 def test_movement_returns_when_the_console_unfreezes():
@@ -567,7 +595,7 @@ def test_movement_returns_when_the_console_unfreezes():
     for _ in range(20):
         t += 0.5
         mapper.submit(60.0, 70.0, now=t, distance=127)
-    assert mapper.evaluate(now=t).movement_scale == 0.0
+    assert mapper.evaluate(now=t).movement_scale == mapper.config.movement.floor
 
     for i in range(4):                       # console starts reporting again
         t += 0.5

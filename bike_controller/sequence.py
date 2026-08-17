@@ -143,8 +143,13 @@ class Tokenizer:
             axis, value = None, 0
 
         direction = (1 if value > 0 else -1) if axis is not None else 0
+        # Clear an axis only when it has genuinely RELEASED below the threshold.
+        # Clearing whenever no axis dominates meant a held stick wobbling
+        # through the near-45-degree band re-armed itself and fired the same
+        # token twice -- which in "left right left right" makes the detector
+        # backtrack. "No dominant axis" is not the same event as "released".
         for code in self._sticks:
-            if code != axis:
+            if code != axis and abs(self._raw[code]) <= STICK_THRESHOLD:
                 self._emitted[code] = 0
         if axis is None:
             return None

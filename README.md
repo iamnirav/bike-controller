@@ -249,6 +249,44 @@ The left stick is multiplied by a 0.0–1.0 scale derived from effort. A uniform
 scalar on both components scales magnitude and preserves direction exactly, so
 diagonals are unaffected.
 
+### The baseline
+
+`--movement-floor` is the multiplier you have **at any effort, including none**.
+At the default 0.25 with `--movement-max 75`: 0 W gives 25%, 75 W gives 100%,
+and effort scales only the headroom between them.
+
+The controller always gives you a walk; the bike buys speed on top. That matters
+more than it sounds, because **every bike-side fault we found and could not fix
+now degrades instead of stranding you**: the console's several-second delay
+acknowledging that pedalling resumed, a frozen console, a dropped BLE link. All
+of them leave you slow rather than stuck holding a dead stick. It also clears
+the game's own deadzone, so baseline movement actually registers.
+
+A stale or frozen bike drops **to the baseline, not to zero**. The invariant that
+matters is that a broken bike never grants more movement than a working one, and
+that holds exactly: a dead bike gives what a live bike gives at 0 W. It is safe
+to relax the hard stop because the scale multiplies the *physical* stick — an
+unattended rig does not move, because 0 × 0.25 is still 0.
+
+The cost is that a fault no longer announces itself by stopping you, so one
+fires a haptic cue instead (see below). Set `MOVEMENT_FLOOR=0` for strict
+pedal-or-nothing.
+
+### Frozen consoles
+
+Seen on real hardware: the console latched cadence 51 / power 60 / distance 348
+and resent it **bit-identical for 30 seconds** while the rider sat still. Frames
+kept arriving at 2 Hz, so the staleness check — which only sees silence — never
+fired, and pedalling stopped mattering.
+
+Distance is the discriminator. At fixed resistance the console derives power from
+cadence, so those two are one signal; the accumulator is independent and climbs
+on essentially every sample while the crank turns. All three identical for
+`--frozen-after` seconds means it is repeating itself, not reporting. Detection
+is skipped when distance is unavailable, because then a genuinely steady rider is
+indistinguishable from a stuck console and stopping a real rider is the worse
+error.
+
 ### Why the lower bound is 0
 
 `--movement-min` defaults to **0**, which looks like it would let a feeble pedal
@@ -298,6 +336,7 @@ while riding:
 |---|---|
 | strong 100 ms | hit full speed |
 | strong 200 ms, both motors | sprint engaged |
+| soft 400 ms | bike went stale or frozen — you are on the baseline |
 
 Plus two outside the ride loop, for the launch flow: a **120 ms** ack when the
 Konami code registers, a **700 ms** double-motor buzz when Remote Play is
@@ -386,7 +425,8 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--movement` | `none` | scale the left stick by effort: `power`, `cadence`, or `none` |
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
-| `--movement-floor` | 0.0 | minimum scale once above min; 0 means pure scaling |
+| `--movement-floor` | 0.25 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
+| `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen; 0 disables |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
@@ -404,9 +444,19 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 Enabling `--movement` automatically drops `left_stick` from the gate set —
 gating *and* scaling the same stick is just the gate with extra steps.
 
-`--status` prints `age=` — seconds since the last telemetry frame. Trust that
-over `bike=connected`: a healthy link sits near 1 s, and a climbing age means
-telemetry has stopped even if the connection is nominally up.
+`--status` prints a line a second:
+
+```
+bike=connected age= 0.4s ctrl=8BitDo... cadence= 61.5 (raw 62) gate=OPEN 2.0Hz pwr=  72 res= 3 move=0.96
+```
+
+| Field | Meaning |
+|---|---|
+| `age=` | seconds since the last telemetry frame — **trust this over `bike=connected`** |
+| `Hz` | measured telemetry rate; the gap between this and `tools/live.py` is lag you feel |
+| `pwr=` / `res=` | watts and the raw resistance byte (not the level the console displays) |
+| `move=` | the left-stick multiplier actually being applied |
+| `FROZEN` | appears when the console is repeating one reading |
 
 **Two thresholds, not one.** Hysteresis stops the gate chattering when you hover
 at the boundary; the grace period stops one slow pedal stroke killing your input
@@ -536,7 +586,8 @@ The Pi is headless next to the bike, so there is no way to click "Click to start
 playing" without VNCing in from another device — and the controller cannot help,
 because the bridge grabs it exclusively.
 
-**Enter the Konami code on the controller** (↑ ↑ ↓ ↓ ← → ← → B A) and the bridge
+**Enter the Konami code on the controller** (↑ ↑ ↓ ↓ ← → ← → B A) — d-pad or
+left stick, either works and the bridge
 runs `tools/start-remoteplay.sh`, which launches Chromium at the console's Remote
 Play URL and drives it via the DevTools Protocol.
 
@@ -574,8 +625,13 @@ logging the idle hours would be ~10 MB a day of zeros. An unridden day leaves no
 file at all.
 
 ```
-wall_time, t, cadence_rpm, power_w, resistance, movement_scale, sprint, gate_open
+wall_time, t, cadence_rpm, power_w, resistance, distance_raw, movement_scale, sprint, gate_open
 ```
+
+`distance_raw` is the console's own accumulator, which is what the freeze guard
+watches. Rows are written from the output loop so the derived values match the
+raw ones in the same row — logging at submit time put each row's
+`movement_scale` one sample behind its own cadence.
 
 Logs live at `~/bike-rides/` on the Pi — **outside the repo on purpose**: they
 are timestamped records of when you exercised and how hard, and nothing about

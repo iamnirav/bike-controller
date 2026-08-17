@@ -143,6 +143,23 @@ def test_stick_must_recentre_before_firing_again():
     assert push(y=-FULL) == [UP]
 
 
+def test_a_wobbling_held_stick_does_not_refire():
+    """Held left, wandering through the near-45-degree band, then back to left.
+
+    The stick never released, so it must emit exactly one token. Clearing the
+    edge state whenever no axis dominates -- rather than when that axis actually
+    falls below the threshold -- re-armed it, and the duplicate makes the
+    detector backtrack in "left right left right".
+    """
+    tok = Tokenizer(CODES)
+    events = stick(x=-FULL, y=0)                 # firmly left
+    diag = int(FULL * 0.72)                      # ambiguous: neither dominates
+    events += stick(x=-diag, y=-diag)
+    events += stick(x=-FULL, y=0)                # firmly left again
+    emitted = [t for t in (tok.token(ev) for ev in events) if t is not None]
+    assert emitted == [LEFT], f"expected one LEFT, got {emitted}"
+
+
 def test_the_whole_code_can_be_entered_with_the_stick():
     tok = Tokenizer(CODES)
     detector = SequenceDetector(KONAMI)

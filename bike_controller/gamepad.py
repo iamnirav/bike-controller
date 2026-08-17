@@ -192,6 +192,10 @@ class Rumbler:
         "sprint_on":  (0xFFFF, 0xFFFF, 200),
         # Launch feedback: a short ack the moment the code is accepted, and a
         # long confirmation once the browser has actually connected.
+        # With a baseline set, a bike fault no longer stops the rider, so it
+        # would otherwise be indistinguishable from the console's normal
+        # several-second delay acknowledging that pedalling resumed.
+        "fault":      (0x0000, 0xC000, 400),
         "ack":        (0xFFFF, 0x0000, 120),
         "ok":         (0xFFFF, 0xFFFF, 700),
     }
