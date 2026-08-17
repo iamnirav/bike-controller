@@ -59,6 +59,21 @@ REMOTE
 
 # Verify the Pi actually moved. The remote block reporting success is not the
 # same as the remote block having run -- see above.
+# config.env is deliberately never synced -- it holds the Pi's own console ID
+# and tuning. The cost of that is a trap: editing it here changes nothing on the
+# Pi, silently. I lost an hour to exactly this, measuring a poll interval the Pi
+# was not using. So say so.
+if [ -f config.env ]; then
+    REMOTE_CFG="$(ssh "$HOST" "cat $REMOTE_DIR/config.env 2>/dev/null" </dev/null || true)"
+    DIFF="$(diff <(sort config.env) <(printf '%s\n' "$REMOTE_CFG" | sort) || true)"
+    if [ -n "$DIFF" ]; then
+        echo "==> NOTE: config.env differs between here and $HOST"
+        echo "    The Pi uses ITS OWN copy; nothing here was applied to it."
+        echo "$DIFF" | sed 's/^/    /'
+        echo "    To change the Pi: ssh $HOST 'nano $REMOTE_DIR/config.env' then restart."
+    fi
+fi
+
 echo "==> confirming"
 LOCAL_SHA="$(git rev-parse HEAD)"
 REMOTE_SHA="$(ssh "$HOST" "cd $REMOTE_DIR && git rev-parse HEAD" </dev/null)"
