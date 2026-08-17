@@ -453,10 +453,11 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
 class _SimSample:
     """Minimal stand-in for BikeState, so simulation can feed the ride log."""
 
-    __slots__ = ("cadence_rpm", "power_w", "resistance")
+    __slots__ = ("cadence_rpm", "power_w", "resistance", "distance_raw")
 
     def __init__(self, cadence_rpm: int, power_w: int) -> None:
-        self.cadence_rpm, self.power_w, self.resistance = cadence_rpm, power_w, 0
+        self.cadence_rpm, self.power_w = cadence_rpm, power_w
+        self.resistance = self.distance_raw = 0
 
 
 async def feed_simulated(mapper: Mapper, status: Status) -> None:

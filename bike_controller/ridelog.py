@@ -30,6 +30,11 @@ FIELDS = [
     "cadence_rpm",
     "power_w",
     "resistance",
+    # The console's own accumulator. Logged because it may advance BEFORE the
+    # console admits a non-zero cadence -- the bike takes seconds and several
+    # crank revolutions to acknowledge that pedalling resumed, and if this moves
+    # first, it is a faster signal than cadence.
+    "distance_raw",
     "movement_scale",   # what the left stick was actually multiplied by
     "sprint",
     "gate_open",
@@ -104,6 +109,7 @@ class RideLogger:
                 sample.cadence_rpm,
                 sample.power_w,
                 sample.resistance,
+                getattr(sample, "distance_raw", 0),
                 f"{status.move:.3f}",
                 int(status.sprint),
                 int(status.gate),

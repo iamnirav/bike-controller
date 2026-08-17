@@ -12,8 +12,9 @@ from bike_controller.ridelog import FIELDS, RideLogger     # noqa: E402
 
 
 class Sample:
-    def __init__(self, cadence=0, power=0, resistance=0):
-        self.cadence_rpm, self.power_w, self.resistance = cadence, power, resistance
+    def __init__(self, cadence=0, power=0, resistance=0, distance=0):
+        self.cadence_rpm, self.power_w = cadence, power
+        self.resistance, self.distance_raw = resistance, distance
 
 
 class FakeStatus:
@@ -40,7 +41,7 @@ def test_idle_bridge_leaves_no_file():
 def test_pedalling_writes_rows_with_the_expected_columns():
     with tempfile.TemporaryDirectory() as tmp:
         logger = RideLogger(tmp)
-        logger.log(Sample(cadence=62, power=74, resistance=3),
+        logger.log(Sample(cadence=62, power=74, resistance=3, distance=4211),
                    FakeStatus(move=0.98, sprint=True, gate=True))
         logger.close()
 
@@ -50,6 +51,7 @@ def test_pedalling_writes_rows_with_the_expected_columns():
         assert rows[0]["cadence_rpm"] == "62"
         assert rows[0]["power_w"] == "74"
         assert rows[0]["resistance"] == "3"
+        assert rows[0]["distance_raw"] == "4211"
         assert rows[0]["movement_scale"] == "0.980"
         assert rows[0]["sprint"] == "1"
         assert rows[0]["gate_open"] == "1"
