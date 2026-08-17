@@ -15,6 +15,17 @@ WatchdogSec=15
 
 # Needs root for /dev/uinput and for EVIOCGRAB on the controller.
 User=root
+
+# Chromium software-decodes the Remote Play video -- the Pi 5 has no hardware
+# H.264 decode -- and that costs over a full core. Measured: telemetry drops
+# from ~2.5Hz to ~1.4Hz once a stream is running, and the rider feels that as
+# lag, because the delay before movement starts is one telemetry period.
+#
+# The bridge is tiny and mostly asleep; it just needs to be scheduled promptly
+# when a BLE reply arrives. Priority costs Chromium almost nothing and stops
+# video decoding starving the poll loop.
+Nice=-10
+CPUWeight=10000
 WorkingDirectory=@REPO@
 
 # All tuning lives here. Change a threshold, restart -- no daemon-reload, and
