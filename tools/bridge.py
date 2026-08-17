@@ -136,9 +136,26 @@ class ControllerHolder:
         input_event into whatever took it. A ride CSV, for instance.
         """
         reader, self.reader = self.reader, None
-        if self._rumble_task is not None and not self._rumble_task.done():
-            with contextlib.suppress(asyncio.TimeoutError, Exception):
-                await asyncio.wait_for(asyncio.shield(self._rumble_task), 2.0)
+        task = self._rumble_task
+        self._rumble_task = None        # or the guard in rumble_raw stays true
+                                        # forever and the NEW pad never buzzes
+        if task is not None and not task.done():
+            # shield so the write completes rather than being cancelled
+            # mid-ioctl -- cancelling is how you get the corruption this method
+            # exists to prevent.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(task), 2.0)
+            if not task.done():
+                # The pad is wedged. Closing now would put us back in exactly
+                # the use-after-close this method prevents, so deliberately
+                # leak the fd instead: one leaked fd per wedged controller is
+                # far cheaper than a 24-byte input_event landing in whatever
+                # recycles that number. Say so -- silence here is what would
+                # make the corruption undiagnosable.
+                print("  rumble write still in flight after 2s; leaving the "
+                      "controller fd open rather than closing it under a live "
+                      "write", flush=True)
+                return
         if reader is not None:
             reader.close()
 

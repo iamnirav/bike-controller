@@ -15,7 +15,6 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-USER_NAME="$(stat -c '%U' "$REPO")"
 UNIT=bike-bridge
 cd "$REPO"
 
