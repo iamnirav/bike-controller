@@ -577,8 +577,9 @@ file at all.
 wall_time, t, cadence_rpm, power_w, resistance, movement_scale, sprint, gate_open
 ```
 
-Logs live at `~/bike-rides/` on the Pi — **outside the repo on purpose**, since
-`tools/deploy.sh` rsyncs with `--delete` and would erase them otherwise.
+Logs live at `~/bike-rides/` on the Pi — **outside the repo on purpose**: they
+are timestamped records of when you exercised and how hard, and nothing about
+them belongs anywhere near a public repository.
 
 ```bash
 python3 tools/ride_report.py ~/bike-rides/

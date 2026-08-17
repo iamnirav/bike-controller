@@ -114,6 +114,33 @@ class ControllerHolder:
         self._rumble_task = asyncio.create_task(
             asyncio.to_thread(reader.rumbler.passthrough, strong, weak)
         )
+        # to_thread can fail on its own (loop shutting down, executor
+        # exhausted). Nothing else retrieves this task's exception.
+        self._rumble_task.add_done_callback(self._rumble_done)
+
+    @staticmethod
+    def _rumble_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            print(f"  rumble forward failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+
+    async def release(self) -> None:
+        """Drop the controller, waiting for any in-flight rumble write first.
+
+        Closing the device while a worker thread is inside upload_effect() or
+        write() means it operates on a closing fd -- and if that fd number is
+        recycled by the next open(), the worker writes a 24-byte binary
+        input_event into whatever took it. A ride CSV, for instance.
+        """
+        reader, self.reader = self.reader, None
+        if self._rumble_task is not None and not self._rumble_task.done():
+            with contextlib.suppress(asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(asyncio.shield(self._rumble_task), 2.0)
+        if reader is not None:
+            reader.close()
 
     @property
     def can_rumble(self) -> bool:
@@ -168,7 +195,11 @@ class Launcher:
     # Worst legitimate case is ~30s to attach + the launcher's own --timeout.
     # The bridge's liveness must not depend on a subprocess choosing to exit --
     # that layering is what wedged the launcher in the first place.
-    MAX_RUNTIME = 360.0
+    # Must exceed remoteplay.py's worst case, or the rider gets a failure buzz
+    # for a launch that was still going: 3 attempts x (2s kill + 30s attach +
+    # 75s drive + 25s stream check) + 2s ~= 400s. Keep in step with --attempts
+    # and --attempt-timeout in tools/start-remoteplay.sh.
+    MAX_RUNTIME = 450.0
 
     def __init__(self, command: list[str] | None, rumble=None) -> None:
         self.command = command
@@ -435,17 +466,13 @@ async def feed_from_controller(
                     launcher.trigger()
             raise ConnectionError("controller event stream ended")
         except asyncio.CancelledError:
-            holder.reader = None
-            if reader is not None:
-                reader.close()
+            await holder.release()
             raise
         except Exception as exc:                                   # noqa: BLE001
             # Drop the reader BEFORE backing off. Its axis/button dict still
             # holds the last state, so leaving it in place would replay
             # stick-forward and held buttons for the whole 2s sleep.
-            holder.reader = None
-            if reader is not None:
-                reader.close()
+            await holder.release()
             status.controller = "none"
             print(f"  controller lost ({type(exc).__name__}: {exc}); "
                   f"re-acquiring", flush=True)
@@ -531,6 +558,11 @@ async def output_loop(
         # Poll every frame -- an unanswered upload blocks the browser -- but
         # forward at most 20/s. A game can emit effects far faster than a pad
         # can render them, and each forward costs a USB round trip.
+        if rumbles:
+            if not status.game_rumble_seen:
+                status.game_rumble_seen = True
+                print("  game rumble received -- passthrough is working end to end",
+                      flush=True)
         if rumbles and now - last_rumble >= 0.05:
             last_rumble = now
             # Say so the first time. Whether Remote Play's web client forwards
@@ -545,10 +577,6 @@ async def output_loop(
             # one pair of motors and only the strongest is audible.
             holder.rumble_raw(max(s for s, _ in rumbles),
                               max(w for _, w in rumbles))
-        elif rumbles and not status.game_rumble_seen:
-            status.game_rumble_seen = True
-            print("  game rumble received -- passthrough is working end to end",
-                  flush=True)
 
         # Logged HERE, not from the bike feed: this is the only place that has
         # a telemetry sample and the mapping derived FROM it at the same instant.
@@ -685,6 +713,12 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"--movement-min ({args.movement_min})")
     if not 0.0 <= args.movement_floor < 1.0:
         parser.error("--movement-floor must be in [0.0, 1.0)")
+    if not 5.0 <= args.frame_rate <= 1000.0:
+        parser.error(
+            f"--frame-rate ({args.frame_rate}) must be between 5 and 1000. "
+            "Zero divides by zero; negative spins the loop at 100% CPU (and it "
+            "runs at Nice=-10); below the telemetry rate, ride-log rows are "
+            "silently dropped.")
     if not 0.0 < args.poll_interval <= 0.5:
         # The staleness window is derived from this, so an unbounded value buys
         # seconds of full-deflection movement from a dead bike. The model behind

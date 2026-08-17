@@ -29,7 +29,7 @@ for t in tests/test_*.py; do ./.venv/bin/python "$t" | tail -1 | sed 's/^/    /'
 # A mutant that survives means a test is not constraining what it claims to.
 # Run before pushing, so a weakened suite never reaches the Pi.
 echo "==> mutation testing"
-python3 tools/mutate.py | tail -1 | sed 's/^/    /'
+./.venv/bin/python tools/mutate.py | tail -1 | sed 's/^/    /'
 
 if [ -n "$(git status --porcelain)" ]; then
     echo "ERROR: working tree is dirty. Commit first -- the Pi pulls from git," >&2
@@ -64,12 +64,21 @@ REMOTE
 # Pi, silently. I lost an hour to exactly this, measuring a poll interval the Pi
 # was not using. So say so.
 if [ -f config.env ]; then
+    # Compare KEYS and whether values match, never printing the values:
+    # config.env holds XBOX_CONSOLE_ID, the one thing the packaging work went to
+    # trouble to keep out of the repo. Deploy output ends up in screenshots.
+    keyhash() { grep -vE '^\s*(#|$)' | sed 's/=.*/=/' | sort; }
+    valhash() { grep -vE '^\s*(#|$)' | sort | shasum | cut -c1-8; }
     REMOTE_CFG="$(ssh "$HOST" "cat $REMOTE_DIR/config.env 2>/dev/null" </dev/null || true)"
-    DIFF="$(diff <(sort config.env) <(printf '%s\n' "$REMOTE_CFG" | sort) || true)"
-    if [ -n "$DIFF" ]; then
+    if [ -z "$REMOTE_CFG" ]; then
+        echo "==> NOTE: $HOST has no config.env yet -- run ./install.sh there."
+    elif [ "$(printf '%s\n' "$REMOTE_CFG" | valhash)" != "$(valhash < config.env)" ]; then
         echo "==> NOTE: config.env differs between here and $HOST"
         echo "    The Pi uses ITS OWN copy; nothing here was applied to it."
-        echo "$DIFF" | sed 's/^/    /'
+        DIFFKEYS="$(diff <(keyhash < config.env) <(printf '%s\n' "$REMOTE_CFG" | keyhash) \
+                    | grep -oE '[A-Z_]+=' | sort -u | tr '\n' ' ')"
+        [ -n "$DIFFKEYS" ] && echo "    keys only on one side: $DIFFKEYS"
+        echo "    (values not shown -- config.env holds your console ID)"
         echo "    To change the Pi: ssh $HOST 'nano $REMOTE_DIR/config.env' then restart."
     fi
 fi

@@ -19,7 +19,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${RIDE_LOG:=1}"
 : "${FRAME_RATE:=60}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
-: "${RIDE_LOG_DIR:=/home/$DESKTOP_USER/bike-rides}"
+# The real home, not /home/<user>: correct for root and for any account
+# whose home is elsewhere.
+: "${RIDE_LOG_DIR:=$(getent passwd "$DESKTOP_USER" | cut -d: -f6)/bike-rides}"
 
 args=(
     --movement power

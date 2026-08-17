@@ -83,7 +83,12 @@ if [ ! -f config.env ]; then
 fi
 # shellcheck disable=SC1091
 . ./config.env
-if [ -z "${XBOX_CONSOLE_ID:-}" ]; then
+if [ -z "${XBOX_CONSOLE_ID:-}" ] && [ ! -t 0 ]; then
+    # deploy.sh runs this over `ssh bash -s <<heredoc`, so stdin is the script
+    # itself and already consumed. `read` would get EOF and, under set -e, abort
+    # the whole install with no message.
+    echo "    XBOX_CONSOLE_ID is not set. Set it in config.env before riding."
+elif [ -z "${XBOX_CONSOLE_ID:-}" ]; then
     echo "    Your Xbox console ID is needed to start Remote Play."
     echo "    Open https://www.xbox.com/play/consoles, pick your console, and copy"
     echo "    the ID from the URL: https://play.xbox.com/remoteplay/<THIS_PART>"
@@ -132,6 +137,15 @@ else
     echo "    no controller found. Plug one in and re-run to generate the udev rule."
     echo "    Without it the browser also sees the physical pad, as a phantom that"
     echo "    never reports input."
+fi
+
+say "Browser"
+if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+    skip "chromium"
+else
+    echo "    chromium NOT found. The bridge works, but the Konami code cannot"
+    echo "    open Remote Play -- you would get three failure buzzes mid-ride."
+    echo "    sudo apt-get install chromium"
 fi
 
 say "Service"

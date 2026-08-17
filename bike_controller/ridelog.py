@@ -68,6 +68,9 @@ class RideLogger:
         self._file = path.open("w", newline="")
         self._writer = csv.writer(self._file)
         self._writer.writerow(FIELDS)
+        # FIELDS documents `t` as "seconds since this log started"; without this
+        # the second file after a rotation starts at t=10804.
+        self._start = time.monotonic()
         self.path = path          # only once the file really exists
 
     def log(self, sample, status) -> None:
