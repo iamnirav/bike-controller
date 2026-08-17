@@ -129,6 +129,7 @@ class Wiring:
     gated_axes: frozenset[int]
     gated_buttons: frozenset[int]
     rumble: bool
+    frame_rate: float
 
 
 # Up Up Down Down Left Right Left Right B A. The d-pad is a hat axis, which is
@@ -252,7 +253,11 @@ class Launcher:
               flush=True)
         self._task = asyncio.create_task(self._run())
 
-FRAME_RATE = 60.0
+# Output frames per second. Higher means lower controller latency; it also means
+# more event-loop wakeups competing with BLE polling, which on a Pi busy
+# software-decoding a video stream costs telemetry rate -- and telemetry rate is
+# what sets how long after you start pedalling the game starts moving.
+DEFAULT_FRAME_RATE = 60.0
 
 AXIS_CHOICES = {
     "none": None,
@@ -457,7 +462,7 @@ async def output_loop(
     watchdog: Watchdog | None = None,
     ride_log: RideLogger | None = None,
 ) -> None:
-    period = 1.0 / FRAME_RATE
+    period = 1.0 / wiring.frame_rate
     # Haptics are edge-triggered: fire on the transition, not every frame.
     # mapping.py makes both flags hysteretic so hovering at a threshold does
     # not buzz continuously.
@@ -638,6 +643,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--button", action="append", type=parse_button, default=[],
                         help="RPM:BUTTON, repeatable (e.g. --button 80:BTN_TR)")
 
+    parser.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE,
+                        help="virtual pad output frames per second "
+                             f"(default {DEFAULT_FRAME_RATE:.0f}). Lower frees "
+                             "the event loop for BLE polling.")
     parser.add_argument("--no-rumble", action="store_true",
                         help="disable haptic cues on the physical controller")
     parser.add_argument("--rumble-passthrough", action="store_true",
@@ -738,6 +747,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             gated_axes=frozenset(gated_axes),
             gated_buttons=frozenset(gated_buttons),
             rumble=not args.no_rumble,
+            frame_rate=args.frame_rate,
         ),
         gate_groups=tuple(groups),
         notes=tuple(notes),
@@ -793,6 +803,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
+    print(f"Frame rate: {wiring.frame_rate:.0f} Hz")
 
     if launcher.enabled:
         trigger = ("Konami code (up up down down left right left right B A)"

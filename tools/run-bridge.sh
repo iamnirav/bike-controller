@@ -17,6 +17,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${POLL_INTERVAL:=0.05}"
 : "${RUMBLE_PASSTHROUGH:=1}"
 : "${RIDE_LOG:=1}"
+: "${FRAME_RATE:=60}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 : "${RIDE_LOG_DIR:=/home/$DESKTOP_USER/bike-rides}"
 
@@ -25,6 +26,7 @@ args=(
     --movement-max "$MOVEMENT_MAX"
     --sprint-at "$SPRINT_AT"
     --poll-interval "$POLL_INTERVAL"
+    --frame-rate "$FRAME_RATE"
     --launch-on-input "$REPO/tools/start-remoteplay.sh"
     --status
 )
