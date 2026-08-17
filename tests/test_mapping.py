@@ -447,6 +447,55 @@ def test_movement_can_be_driven_by_cadence():
     assert abs(mapper.evaluate(now=1.0).movement_scale - 0.5) < 0.01
 
 
+def test_frozen_console_is_treated_as_stopped():
+    """Observed on real hardware: the console latched one reading and resent it
+    unchanged for 30 seconds while the rider sat still. Frames kept arriving, so
+    the staleness check -- which only sees silence -- never fired, and pedalling
+    stopped mattering."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for i in range(20):                      # genuine riding: distance climbs
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+    assert mapper.evaluate(now=t).movement_scale > 0.5
+    assert not mapper.is_frozen(now=t)
+
+    frozen_at = t
+    for _ in range(20):                      # console repeats itself verbatim
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=157)
+    assert t - frozen_at > mapper.config.frozen_after
+    assert mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale == 0.0
+
+
+def test_a_brief_repeat_is_not_a_freeze():
+    """The console holds its last reading for ~2s at the end of every pedalling
+    stretch. Treating that as a fault would fire on every single stop."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for i in range(10):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+    for _ in range(4):                       # ~2s of repeats
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=127)
+    assert not mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale > 0.5
+
+
+def test_freeze_detection_needs_distance():
+    """Without distance a steady rider is indistinguishable from a stuck
+    console, and stopping a real rider is the worse error."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for _ in range(30):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t)     # no distance supplied
+    assert not mapper.is_frozen(now=t)
+    assert mapper.evaluate(now=t).movement_scale > 0.5
+
+
 def test_gate_disabled_always_passes():
     mapper = Mapper(MappingConfig(gate=GateConfig(enabled=False)))
     assert mapper.evaluate(now=0.0).gate_open is True

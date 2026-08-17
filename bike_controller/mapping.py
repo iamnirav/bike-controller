@@ -188,6 +188,17 @@ class MappingConfig:
     buttons: list[ButtonRule] = field(default_factory=list)
     # None keeps CadenceTracker's default; set it from stale_after_for().
     stale_after: float | None = None
+    # Seconds of bit-identical telemetry before the console is treated as
+    # frozen. Observed on real hardware: it latched cadence 51 / power 60 /
+    # distance 348 and resent it unchanged for 30 seconds while the rider sat
+    # still, and the character kept walking the whole time. Frames kept
+    # arriving, so the staleness check -- which only sees SILENCE -- never
+    # fired.
+    #
+    # A short freeze is normal: the console holds its last reading for ~2s at
+    # the end of every pedalling stretch before zeroing. 4s clears that with
+    # margin and is far below the 30s failure.
+    frozen_after: float = 4.0
 
 
 @dataclass
@@ -217,12 +228,49 @@ class Mapper:
         self._cadence_raw: float = 0.0
         self._sprinting = False
         self._at_max = False
+        self._have_distance = False
+        self._last_reading: tuple | None = None
+        self._reading_changed_at: float | None = None
+        self._frozen_reported = False
 
     def submit(self, cadence_rpm: float, power_w: float = 0.0,
-               now: float | None = None) -> None:
+               now: float | None = None, distance: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
         self._cadence_raw = cadence_rpm
         self._power_raw = power_w
+
+        # Freeze detection. Distance is the discriminator: a steady rider can
+        # genuinely hold the same integer cadence (and therefore the same
+        # derived power) for seconds, but the console's own accumulator keeps
+        # climbing while the crank turns. All three identical means it is
+        # repeating itself, not reporting.
+        reading = (cadence_rpm, power_w, distance)
+        self._have_distance = distance is not None
+        if reading != self._last_reading:
+            self._last_reading = reading
+            self._reading_changed_at = now
+            self._frozen_reported = False
+        elif self._reading_changed_at is None:
+            self._reading_changed_at = now
+
         self.tracker.submit(cadence_rpm, now)
+
+    def is_frozen(self, now: float | None = None) -> bool:
+        """True when the console has been repeating one reading too long.
+
+        Only meaningful while it claims movement -- an idle bike legitimately
+        repeats zeros forever.
+        """
+        # Needs distance: without it, a steady rider holding one integer
+        # cadence is indistinguishable from a console repeating itself, and
+        # stopping a real rider is the worse error. Also disabled by setting
+        # frozen_after to 0.
+        if not self._have_distance or self.config.frozen_after <= 0:
+            return False
+        if self._cadence_raw <= 0 or self._reading_changed_at is None:
+            return False
+        now = time.monotonic() if now is None else now
+        return (now - self._reading_changed_at) > self.config.frozen_after
 
     def _movement(self, stale: bool) -> tuple[float, bool, bool]:
         """Return (scale, sprint, at_max). Raw and unsmoothed by design."""
@@ -294,7 +342,15 @@ class Mapper:
         cadence = self.tracker.value(now)
         out = MappingOutput(cadence=cadence)
 
-        stale = self.tracker.is_stale(now)
+        frozen = self.is_frozen(now)
+        if frozen and not self._frozen_reported:
+            self._frozen_reported = True
+            print(f"  console telemetry frozen at cadence={self._cadence_raw:.0f} "
+                  f"power={self._power_raw:.0f} for >"
+                  f"{self.config.frozen_after:.0f}s -- treating as stopped",
+                  flush=True)
+        # Frozen counts as stale: frames are arriving, but they carry nothing.
+        stale = self.tracker.is_stale(now) or frozen
         out.gate_open = self._update_gate(cadence, now, stale)
         out.power = self._power_raw
         out.movement_scale, out.sprint, out.at_max = self._movement(stale)

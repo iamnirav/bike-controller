@@ -434,7 +434,8 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     status.cadence_raw = sample.cadence_rpm
                     status.bike_seen = time.monotonic()
                     status.frames += 1
-                    mapper.submit(sample.cadence_rpm, sample.power_w)
+                    mapper.submit(sample.cadence_rpm, sample.power_w,
+                                  distance=sample.distance_raw)
                     # Handed to the output loop rather than logged here, so the
                     # row's derived values match its raw ones. Calling
                     # mapper.evaluate() here would advance the filter's clock and
@@ -721,6 +722,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="button held when sprinting (default BTN_THUMBL, "
                              "i.e. left stick click)")
 
+    parser.add_argument("--frozen-after", type=float, default=4.0,
+                        help="seconds of bit-identical telemetry before the "
+                             "console counts as frozen and movement is zeroed. "
+                             "0 disables. (default 4)")
     parser.add_argument("--no-gate", action="store_true")
     parser.add_argument(
         "--gate-inputs", default="left_stick",
@@ -840,6 +845,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             # Derived, never hand-set: a fixed window silently stops matching
             # the telemetry rate the moment --poll-interval changes.
             stale_after=stale_after_for(args.poll_interval),
+            frozen_after=args.frozen_after,
         ),
         wiring=Wiring(
             axis_code=axis_code,
@@ -900,6 +906,8 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     # and duplicating CadenceTracker's default here would let the banner lie.
     print(f"Fail-safe: input zeroes after "
           f"{mapper.tracker.stale_after:.2f}s without telemetry")
+    print(f"Freeze guard: "
+          f"{f'{args.frozen_after:.0f}s' if args.frozen_after > 0 else 'off'}")
     print(f"Ride log: {args.ride_log or 'off'}")
     print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")

@@ -18,6 +18,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${RUMBLE_PASSTHROUGH:=1}"
 : "${RIDE_LOG:=1}"
 : "${FRAME_RATE:=60}"
+: "${FROZEN_AFTER:=4}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 # The real home, not /home/<user>: correct for root and for any account
 # whose home is elsewhere.
@@ -29,6 +30,7 @@ args=(
     --sprint-at "$SPRINT_AT"
     --poll-interval "$POLL_INTERVAL"
     --frame-rate "$FRAME_RATE"
+    --frozen-after "$FROZEN_AFTER"
     --launch-on-input "$REPO/tools/start-remoteplay.sh"
     --status
 )
