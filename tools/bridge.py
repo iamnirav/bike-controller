@@ -73,6 +73,10 @@ class Status:
     move: float = 1.0
     sprint: bool = False
     game_rumble_seen: bool = False
+    frames: int = 0                     # telemetry frames since start
+    # Set by whichever feed is running; consumed by output_loop, which logs it
+    # alongside the mapping derived from that same sample.
+    pending_sample: object = None
 
 
 class ControllerHolder:
@@ -85,15 +89,75 @@ class ControllerHolder:
 
     def __init__(self) -> None:
         self.reader: ControllerReader | None = None
+        self._rumble_task: asyncio.Task | None = None
 
     def rumble(self, name: str) -> None:
         if self.can_rumble:
             self.reader.rumbler.play(name)
 
     def rumble_raw(self, strong: int, weak: int) -> None:
-        """Forward the game's own rumble, at its own magnitudes."""
-        if self.can_rumble:
-            self.reader.rumbler.passthrough(strong, weak)
+        """Forward the game's own rumble, at its own magnitudes.
+
+        Off the event loop: this is an ioctl plus a write to a wireless USB pad,
+        and doing it inline made the same loop that drives BLE polling wait on
+        the controller. Measured cost during a firefight: telemetry dropped from
+        ~0.50s per sample to ~0.73s, which the rider feels as lag.
+
+        If a write is still in flight the new value is dropped rather than
+        queued -- the pad has one pair of motors and only the latest matters.
+        """
+        if not self.can_rumble:
+            return
+        if self._rumble_task is not None and not self._rumble_task.done():
+            return
+        reader = self.reader
+        self._rumble_task = asyncio.create_task(
+            asyncio.to_thread(reader.rumbler.passthrough, strong, weak)
+        )
+        # to_thread can fail on its own (loop shutting down, executor
+        # exhausted). Nothing else retrieves this task's exception.
+        self._rumble_task.add_done_callback(self._rumble_done)
+
+    @staticmethod
+    def _rumble_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            print(f"  rumble forward failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+
+    async def release(self) -> None:
+        """Drop the controller, waiting for any in-flight rumble write first.
+
+        Closing the device while a worker thread is inside upload_effect() or
+        write() means it operates on a closing fd -- and if that fd number is
+        recycled by the next open(), the worker writes a 24-byte binary
+        input_event into whatever took it. A ride CSV, for instance.
+        """
+        reader, self.reader = self.reader, None
+        task = self._rumble_task
+        self._rumble_task = None        # or the guard in rumble_raw stays true
+                                        # forever and the NEW pad never buzzes
+        if task is not None and not task.done():
+            # shield so the write completes rather than being cancelled
+            # mid-ioctl -- cancelling is how you get the corruption this method
+            # exists to prevent.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(task), 2.0)
+            if not task.done():
+                # The pad is wedged. Closing now would put us back in exactly
+                # the use-after-close this method prevents, so deliberately
+                # leak the fd instead: one leaked fd per wedged controller is
+                # far cheaper than a 24-byte input_event landing in whatever
+                # recycles that number. Say so -- silence here is what would
+                # make the corruption undiagnosable.
+                print("  rumble write still in flight after 2s; leaving the "
+                      "controller fd open rather than closing it under a live "
+                      "write", flush=True)
+                return
+        if reader is not None:
+            reader.close()
 
     @property
     def can_rumble(self) -> bool:
@@ -109,6 +173,7 @@ class Wiring:
     gated_axes: frozenset[int]
     gated_buttons: frozenset[int]
     rumble: bool
+    frame_rate: float
 
 
 # Up Up Down Down Left Right Left Right B A. The d-pad is a hat axis, which is
@@ -147,7 +212,11 @@ class Launcher:
     # Worst legitimate case is ~30s to attach + the launcher's own --timeout.
     # The bridge's liveness must not depend on a subprocess choosing to exit --
     # that layering is what wedged the launcher in the first place.
-    MAX_RUNTIME = 360.0
+    # Must exceed remoteplay.py's worst case, or the rider gets a failure buzz
+    # for a launch that was still going: 3 attempts x (2s kill + 30s attach +
+    # 75s drive + 25s stream check) + 2s ~= 400s. Keep in step with --attempts
+    # and --attempt-timeout in tools/start-remoteplay.sh.
+    MAX_RUNTIME = 450.0
 
     def __init__(self, command: list[str] | None, rumble=None) -> None:
         self.command = command
@@ -232,7 +301,11 @@ class Launcher:
               flush=True)
         self._task = asyncio.create_task(self._run())
 
-FRAME_RATE = 60.0
+# Output frames per second. Higher means lower controller latency; it also means
+# more event-loop wakeups competing with BLE polling, which on a Pi busy
+# software-decoding a video stream costs telemetry rate -- and telemetry rate is
+# what sets how long after you start pedalling the game starts moving.
+DEFAULT_FRAME_RATE = 60.0
 
 AXIS_CHOICES = {
     "none": None,
@@ -285,8 +358,7 @@ def parse_button(spec: str) -> ButtonRule:
 
 
 async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
-                         poll_interval: float,
-                         ride_log: RideLogger | None = None) -> None:
+                         poll_interval: float) -> None:
     """Keep a bike link alive, reconnecting indefinitely.
 
     This must never give up. At boot the console is asleep and unreachable, and
@@ -322,13 +394,13 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
                     status.bike_seen = time.monotonic()
+                    status.frames += 1
                     mapper.submit(sample.cadence_rpm, sample.power_w)
-                    if ride_log is not None:
-                        # `status` carries the output loop's most recent
-                        # evaluation. Calling mapper.evaluate() here instead
-                        # would advance the filter's clock and steal dt from the
-                        # loop that actually drives the pad.
-                        ride_log.log(sample, status)
+                    # Handed to the output loop rather than logged here, so the
+                    # row's derived values match its raw ones. Calling
+                    # mapper.evaluate() here would advance the filter's clock and
+                    # steal dt from the loop that actually drives the pad.
+                    status.pending_sample = sample
         except asyncio.CancelledError:
             raise
         except (Exception, StopAsyncIteration) as exc:             # noqa: BLE001
@@ -348,8 +420,7 @@ class _SimSample:
         self.cadence_rpm, self.power_w, self.resistance = cadence_rpm, power_w, 0
 
 
-async def feed_simulated(mapper: Mapper, status: Status,
-                        ride_log: RideLogger | None = None) -> None:
+async def feed_simulated(mapper: Mapper, status: Status) -> None:
     """A slow cadence sweep, so gate/axis behaviour is visible in a browser."""
     status.bike = "simulated"
     start = time.monotonic()
@@ -361,10 +432,9 @@ async def feed_simulated(mapper: Mapper, status: Status,
         power = max(0.0, 2.0 * (cadence - 25.0))
         status.cadence_raw = round(cadence)
         mapper.submit(cadence, power)
-        if ride_log is not None:
-            # Also logged in simulation, so --ride-log is exercised by the
-            # deploy smoke run rather than only ever on a real ride.
-            ride_log.log(_SimSample(round(cadence), round(power)), status)
+        # Handed over the same way the real feed does, so --ride-log is
+        # exercised by the smoke run rather than only ever on a real ride.
+        status.pending_sample = _SimSample(round(cadence), round(power))
         # Mirror the deployed telemetry rate (~2.56 Hz), not the original
         # ~0.87 Hz -- otherwise the simulator runs closer to the staleness
         # window than the real thing ever does.
@@ -413,17 +483,13 @@ async def feed_from_controller(
                     launcher.trigger()
             raise ConnectionError("controller event stream ended")
         except asyncio.CancelledError:
-            holder.reader = None
-            if reader is not None:
-                reader.close()
+            await holder.release()
             raise
         except Exception as exc:                                   # noqa: BLE001
             # Drop the reader BEFORE backing off. Its axis/button dict still
             # holds the last state, so leaving it in place would replay
             # stick-forward and held buttons for the whole 2s sleep.
-            holder.reader = None
-            if reader is not None:
-                reader.close()
+            await holder.release()
             status.controller = "none"
             print(f"  controller lost ({type(exc).__name__}: {exc}); "
                   f"re-acquiring", flush=True)
@@ -438,14 +504,17 @@ async def output_loop(
     status: Status,
     stop: asyncio.Event,
     watchdog: Watchdog | None = None,
+    ride_log: RideLogger | None = None,
 ) -> None:
-    period = 1.0 / FRAME_RATE
+    period = 1.0 / wiring.frame_rate
     # Haptics are edge-triggered: fire on the transition, not every frame.
     # mapping.py makes both flags hysteretic so hovering at a threshold does
     # not buzz continuously.
     prev_max = False
     prev_sprint = False
+    last_rumble = 0.0
     while not stop.is_set():
+        now = time.monotonic()
         out = mapper.evaluate()
         status.gate = out.gate_open
         status.cadence = out.cadence
@@ -503,7 +572,16 @@ async def output_loop(
         # blocked in its ioctl, so this is not optional once the pad advertises
         # force feedback.
         rumbles = pad.poll_rumble()
+        # Poll every frame -- an unanswered upload blocks the browser -- but
+        # forward at most 20/s. A game can emit effects far faster than a pad
+        # can render them, and each forward costs a USB round trip.
         if rumbles:
+            if not status.game_rumble_seen:
+                status.game_rumble_seen = True
+                print("  game rumble received -- passthrough is working end to end",
+                      flush=True)
+        if rumbles and now - last_rumble >= 0.05:
+            last_rumble = now
             # Say so the first time. Whether Remote Play's web client forwards
             # game rumble to the Gamepad API at all is the one link in this
             # chain that cannot be tested without a game running, so make it
@@ -517,6 +595,14 @@ async def output_loop(
             holder.rumble_raw(max(s for s, _ in rumbles),
                               max(w for _, w in rumbles))
 
+        # Logged HERE, not from the bike feed: this is the only place that has
+        # a telemetry sample and the mapping derived FROM it at the same instant.
+        # Logging at submit time recorded each row's movement_scale one sample
+        # behind its own cadence and power, which quietly corrupts any analysis.
+        if ride_log is not None and status.pending_sample is not None:
+            ride_log.log(status.pending_sample, status)
+            status.pending_sample = None
+
         pad.sync()
         # Pinged from HERE, not from a timer: the point is to attest that frames
         # are still being emitted. A ping from anywhere else would keep systemd
@@ -527,8 +613,15 @@ async def output_loop(
 
 
 async def status_loop(status: Status, stop: asyncio.Event) -> None:
+    # Telemetry rate measured over the last interval. `age` only ever hinted at
+    # this, and the difference between the bridge's rate and pure polling is
+    # exactly the lag a rider feels.
+    last_frames, last_at = status.frames, time.monotonic()
     while not stop.is_set():
         await asyncio.sleep(1.0)
+        now = time.monotonic()
+        hz = (status.frames - last_frames) / max(1e-6, now - last_at)
+        last_frames, last_at = status.frames, now
         age = (f"{time.monotonic() - status.bike_seen:4.1f}s"
                if status.bike_seen else "  -- ")
         print(
@@ -536,6 +629,7 @@ async def status_loop(status: Status, stop: asyncio.Event) -> None:
             f"ctrl={status.controller[:22]:<22} "
             f"cadence={status.cadence:5.1f} (raw {status.cadence_raw:>3}) "
             f"gate={'OPEN' if status.gate else 'shut'} "
+            f"{hz:4.1f}Hz "
             f"pwr={status.power:4.0f} move={status.move:4.2f}"
             f"{' SPRINT' if status.sprint else ''}",
             flush=True,
@@ -594,6 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--button", action="append", type=parse_button, default=[],
                         help="RPM:BUTTON, repeatable (e.g. --button 80:BTN_TR)")
 
+    parser.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE,
+                        help="virtual pad output frames per second "
+                             f"(default {DEFAULT_FRAME_RATE:.0f}). Lower frees "
+                             "the event loop for BLE polling.")
     parser.add_argument("--no-rumble", action="store_true",
                         help="disable haptic cues on the physical controller")
     parser.add_argument("--rumble-passthrough", action="store_true",
@@ -632,6 +730,12 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"--movement-min ({args.movement_min})")
     if not 0.0 <= args.movement_floor < 1.0:
         parser.error("--movement-floor must be in [0.0, 1.0)")
+    if not 5.0 <= args.frame_rate <= 1000.0:
+        parser.error(
+            f"--frame-rate ({args.frame_rate}) must be between 5 and 1000. "
+            "Zero divides by zero; negative spins the loop at 100% CPU (and it "
+            "runs at Nice=-10); below the telemetry rate, ride-log rows are "
+            "silently dropped.")
     if not 0.0 < args.poll_interval <= 0.5:
         # The staleness window is derived from this, so an unbounded value buys
         # seconds of full-deflection movement from a dead bike. The model behind
@@ -694,6 +798,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             gated_axes=frozenset(gated_axes),
             gated_buttons=frozenset(gated_buttons),
             rumble=not args.no_rumble,
+            frame_rate=args.frame_rate,
         ),
         gate_groups=tuple(groups),
         notes=tuple(notes),
@@ -749,6 +854,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
+    print(f"Frame rate: {wiring.frame_rate:.0f} Hz")
 
     if launcher.enabled:
         trigger = ("Konami code (up up down down left right left right B A)"
@@ -807,13 +913,13 @@ async def main() -> int:
 
         tasks = [asyncio.create_task(
             output_loop(pad, mapper, holder, settings.wiring, status, stop,
-                        watchdog))]
+                        watchdog, ride_log))]
         if args.simulate_bike:
-            tasks.append(asyncio.create_task(feed_simulated(mapper, status, ride_log)))
+            tasks.append(asyncio.create_task(feed_simulated(mapper, status)))
         else:
             tasks.append(asyncio.create_task(
-                feed_from_bike(args.address, mapper, status, args.poll_interval,
-                               ride_log)))
+                feed_from_bike(args.address, mapper, status,
+                               args.poll_interval)))
         if not args.no_controller:
             tasks.append(asyncio.create_task(
                 feed_from_controller(holder, status, args.controller,

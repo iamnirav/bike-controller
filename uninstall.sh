@@ -16,7 +16,9 @@ cd "$REPO"
 # shellcheck disable=SC1091
 [ -f config.env ] && . ./config.env
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
-: "${RIDE_LOG_DIR:=/home/$DESKTOP_USER/bike-rides}"
+# The real home, not /home/<user>: correct for root and for any account
+# whose home is elsewhere.
+: "${RIDE_LOG_DIR:=$(getent passwd "$DESKTOP_USER" | cut -d: -f6)/bike-rides}"
 
 say()  { printf '\n==> %s\n' "$1"; }
 gone() { printf '    removed %s\n' "$1"; }

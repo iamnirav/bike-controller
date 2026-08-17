@@ -33,4 +33,4 @@ echo "=== $(date -Is) triggered (running as $(whoami)) ==="
 # launch, so we cannot attach to an instance we did not start.
 pkill chromium 2>/dev/null && sleep 2
 
-exec "$REPO/.venv/bin/python" -u "$REPO/tools/remoteplay.py" --timeout 240
+exec "$REPO/.venv/bin/python" -u "$REPO/tools/remoteplay.py" --attempt-timeout 75
