@@ -185,16 +185,47 @@ KONAMI = [
 ]
 
 
-def event_token(event) -> tuple | None:
-    """Reduce an evdev event to a comparable token, or None if uninteresting."""
-    if event.type == e.EV_KEY and event.value == 1:
-        return ("btn", event.code)
-    if event.type == e.EV_ABS and event.value != 0:
-        if event.code == e.ABS_HAT0Y:
+# A stick is analog, so a direction has to be a THRESHOLD crossing rather than a
+# value. 60% of full deflection is well clear of any drift and of a diagonal.
+STICK_THRESHOLD = 0.60 * 32767
+
+
+class Tokenizer:
+    """Reduce evdev events to comparable tokens for the sequence detector.
+
+    Accepts the left stick as well as the d-pad for directions. Nobody entering
+    the Konami code thinks about which one they are holding, and a stick push
+    arrives as ABS_X/ABS_Y, which produced no token at all -- so the sequence
+    silently never matched.
+
+    Stick directions are edge-triggered: held past the threshold they fire once,
+    and must fall back below it before firing again. Without that, one shove
+    would emit a token per event and instantly reset the match.
+    """
+
+    def __init__(self) -> None:
+        self._stick = {e.ABS_X: 0, e.ABS_Y: 0}      # -1, 0, +1
+
+    def token(self, event) -> tuple | None:
+        if event.type == e.EV_KEY and event.value == 1:
+            return ("btn", event.code)
+        if event.type != e.EV_ABS:
+            return None
+        if event.code == e.ABS_HAT0Y and event.value != 0:
             return ("hat_y", 1 if event.value > 0 else -1)
-        if event.code == e.ABS_HAT0X:
+        if event.code == e.ABS_HAT0X and event.value != 0:
             return ("hat_x", 1 if event.value > 0 else -1)
-    return None
+        if event.code in self._stick:
+            if event.value > STICK_THRESHOLD:
+                direction = 1
+            elif event.value < -STICK_THRESHOLD:
+                direction = -1
+            else:
+                direction = 0
+            previous, self._stick[event.code] = self._stick[event.code], direction
+            if direction and direction != previous:
+                return ("hat_y" if event.code == e.ABS_Y else "hat_x", direction)
+        return None
 
 
 class Launcher:
@@ -452,6 +483,7 @@ async def feed_from_controller(
     unplugged. `holder.reader` is None whenever we have no controller, and
     the output loop treats that as "emit nothing".
     """
+    tokenizer = Tokenizer()
     while True:
         reader = None
         try:
@@ -472,15 +504,24 @@ async def feed_from_controller(
                 reader.apply(event)
                 if launcher is None:
                     continue
-                token = event_token(event)
+                token = tokenizer.token(event)
                 if token is None:
                     continue
                 if detector is None:
                     if token[0] == "btn":        # any-button mode
                         launcher.trigger()
-                elif detector.feed(token):
+                    continue
+                was = detector.index
+                if detector.feed(token):
                     print("  konami code entered", flush=True)
                     launcher.trigger()
+                elif was >= 3 and detector.index < was:
+                    # Losing a half-entered sequence is invisible otherwise, and
+                    # "I entered it and nothing happened" is unfalsifiable
+                    # without knowing how far it got.
+                    print(f"  konami progress lost at step {was}/"
+                          f"{len(detector.sequence)} (got {token}, "
+                          f"expected {detector.sequence[was]})", flush=True)
             raise ConnectionError("controller event stream ended")
         except asyncio.CancelledError:
             await holder.release()
