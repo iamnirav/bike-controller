@@ -138,8 +138,13 @@ class MovementConfig:
     source: Literal["power", "cadence"] = "power"
     min_value: float = 0.0
     max_value: float = 130.0
-    # Minimum scale once above min_value. 0.0 means pure scaling: the game's
-    # deadzone is the only floor. Raise it to force movement to start abruptly.
+    # The BASELINE: the multiplier you always have, at any effort including
+    # none. 0.25 means the controller alone gives you a quarter-speed walk and
+    # the bike buys the rest, so 0 W maps to 0.25 and max_value maps to 1.0.
+    #
+    # This is what makes bike-side faults degrade instead of strand you: the
+    # console's restart delay, a freeze, or a dropped link all leave you moving
+    # slowly rather than stuck. 0.0 restores strict pedal-or-nothing.
     floor: float = 0.0
     sprint_at: float | None = None         # same units as `source`
     # Sprint releases below sprint_at * this. Without hysteresis, effort
@@ -291,14 +296,19 @@ class Mapper:
         if stale:
             self._sprinting = False
             self._at_max = False
-            return 0.0, False, False
+            # Down to the baseline, not to zero: the baseline is what the
+            # CONTROLLER gives you, and the bike being unreachable should not
+            # take that away. With floor 0 this is the old hard stop.
+            return movement.floor, False, False
 
         value = self._power_raw if movement.source == "power" else self._cadence_raw
 
         span = max(1e-6, movement.max_value - movement.min_value)
         fraction = (value - movement.min_value) / span
         fraction = min(1.0, max(0.0, fraction))
-        scale = 0.0 if fraction <= 0.0 else movement.floor + fraction * (1.0 - movement.floor)
+        # The baseline applies at every effort, including none -- no special
+        # case at zero. Effort scales the REMAINING headroom above it.
+        scale = movement.floor + fraction * (1.0 - movement.floor)
 
         # Both flags are hysteretic: they latch on at the threshold and release
         # below it, so effort wobbling around the boundary does not chatter.

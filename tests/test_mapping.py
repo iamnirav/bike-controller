@@ -380,12 +380,33 @@ def test_dead_feed_zeroes_movement_scale():
     assert out.sprint is False
 
 
-def test_movement_floor_clears_the_game_deadzone():
-    mapper = make_movement_mapper(min_value=20.0, floor=0.3)
-    mapper.submit(60.0, 19.0, now=1.0)
-    assert mapper.evaluate(now=1.0).movement_scale == 0.0, "below min must be zero"
-    mapper.submit(60.0, 21.0, now=2.0)
-    assert mapper.evaluate(now=2.0).movement_scale >= 0.3, "floor not applied"
+def test_the_baseline_applies_at_every_effort_including_none():
+    """floor is the multiplier you always have; effort scales what is left above
+    it. 0 W -> baseline, max -> 1.0."""
+    mapper = make_movement_mapper(max_value=75.0, floor=0.25)
+    mapper.submit(0.0, 0.0, now=1.0)
+    assert abs(mapper.evaluate(now=1.0).movement_scale - 0.25) < 0.001
+    mapper.submit(50.0, 37.5, now=2.0)
+    assert abs(mapper.evaluate(now=2.0).movement_scale - 0.625) < 0.01
+    mapper.submit(70.0, 75.0, now=3.0)
+    assert abs(mapper.evaluate(now=3.0).movement_scale - 1.0) < 0.001
+
+
+def test_a_dead_bike_drops_to_the_baseline_not_to_zero():
+    """The baseline is what the CONTROLLER gives you. A bike fault should leave
+    you slow, not stranded -- otherwise a dropped link punishes you harder than
+    simply not pedalling."""
+    mapper = make_movement_mapper(max_value=75.0, floor=0.25)
+    mapper.submit(70.0, 75.0, now=1.0)
+    assert mapper.evaluate(now=1.0).movement_scale == 1.0
+    stale = 1.0 + mapper.tracker.stale_after + 0.1
+    assert abs(mapper.evaluate(now=stale).movement_scale - 0.25) < 0.001
+
+
+def test_zero_baseline_is_still_pedal_or_nothing():
+    mapper = make_movement_mapper(max_value=75.0, floor=0.0)
+    mapper.submit(0.0, 0.0, now=1.0)
+    assert mapper.evaluate(now=1.0).movement_scale == 0.0
 
 
 def test_sprint_fires_above_threshold_only():
