@@ -74,6 +74,7 @@ class Status:
     sprint: bool = False
     game_rumble_seen: bool = False
     frames: int = 0                     # telemetry frames since start
+    resistance: int = 0                 # raw byte, not the console's displayed level
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -432,6 +433,7 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     # to be patient. ~26 missed frames at the deployed rate.
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
+                    status.resistance = sample.resistance
                     status.bike_seen = time.monotonic()
                     status.frames += 1
                     mapper.submit(sample.cadence_rpm, sample.power_w,
@@ -681,7 +683,8 @@ async def status_loop(status: Status, stop: asyncio.Event) -> None:
             f"cadence={status.cadence:5.1f} (raw {status.cadence_raw:>3}) "
             f"gate={'OPEN' if status.gate else 'shut'} "
             f"{hz:4.1f}Hz "
-            f"pwr={status.power:4.0f} move={status.move:4.2f}"
+            f"pwr={status.power:4.0f} res={status.resistance:2d} "
+            f"move={status.move:4.2f}"
             f"{' SPRINT' if status.sprint else ''}",
             flush=True,
         )
