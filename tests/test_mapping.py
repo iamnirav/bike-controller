@@ -164,7 +164,7 @@ def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
 
 def test_the_freeze_guard_works_at_the_deployed_baseline():
     """The guard was only ever tested at floor 0, which nobody runs."""
-    mapper = make_movement_mapper(max_value=75.0, floor=0.25)
+    mapper = make_movement_mapper(max_value=75.0, floor=0.5)
     t = 0.0
     for i in range(10):
         t += 0.5
@@ -175,7 +175,7 @@ def test_the_freeze_guard_works_at_the_deployed_baseline():
         t += 0.5
         mapper.submit(51.0, 60.0, now=t, distance=130)
     assert mapper.is_frozen(now=t)
-    assert mapper.evaluate(now=t).movement_scale == 0.25
+    assert mapper.evaluate(now=t).movement_scale == 0.5
 
 
 def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
@@ -354,10 +354,14 @@ def test_tracker_ignores_time_going_backwards():
 # --- movement scaling -------------------------------------------------------
 
 # Every fail-safe assertion below is written against the CONFIGURED floor, not
-# against 0. Asserting 0 only held in a configuration nobody runs: with the
-# deployed floor of 0.25, eight of these tests failed, so the staleness path and
+# against 0. Asserting 0 only held in a configuration nobody runs: with a
+# non-zero deployed floor, eight of these tests failed, so the staleness path and
 # the whole freeze guard were unverified in production settings.
-FLOORS = (0.0, 0.25)
+#
+# The default is in here BY VALUE rather than imported, so that changing it (as
+# 0.25 -> 0.5 did, to clear the game's deadzone) is a visible edit to the tests
+# and not a silent change of what they cover.
+FLOORS = (0.0, 0.25, 0.5)
 
 
 def make_movement_mapper(**kw) -> Mapper:

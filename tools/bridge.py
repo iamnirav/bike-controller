@@ -696,9 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "deadzone (typically 12-24%%) be the threshold")
     parser.add_argument("--movement-max", type=float, default=100.0,
                         help="effort giving full stick deflection (watts or rpm)")
-    parser.add_argument("--movement-floor", type=float, default=0.25,
+    parser.add_argument("--movement-floor", type=float, default=0.5,
                         help="baseline multiplier you always have, at any effort "
-                             "including none (default 0.25). 0 = strict "
+                             "including none (default 0.5). 0 = strict "
                              "pedal-or-nothing.")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")

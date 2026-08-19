@@ -252,7 +252,7 @@ diagonals are unaffected.
 ### The baseline
 
 `--movement-floor` is the multiplier you have **at any effort, including none**.
-At the default 0.25 with `--movement-max 75`: 0 W gives 25%, 75 W gives 100%,
+At the default 0.5 with `--movement-max 75`: 0 W gives 50%, 75 W gives 100%,
 and effort scales only the headroom between them.
 
 The controller always gives you a walk; the bike buys speed on top. That matters
@@ -262,11 +262,28 @@ acknowledging that pedalling resumed, a frozen console, a dropped BLE link. All
 of them leave you slow rather than stuck holding a dead stick. It also clears
 the game's own deadzone, so baseline movement actually registers.
 
+Clearing that deadzone is the whole reason the number is as large as it is, and
+it is worth understanding before you tune it. A game applies a radial deadzone
+and rescales what is left above it, so a floor that merely *exceeds* the
+deadzone arrives as almost nothing: the first default, 0.25, sat one point above
+the XInput recommended 0.2395 and produced about 1.4% of movement -- a promise of
+a walk that delivered a twitch. The movement stick is also commonly deadzoned
+much harder than the aim stick. In Helldivers 2, with the game's own deadzone
+slider turned off, the right stick registered at 0.1 while the left stick needed
+roughly half deflection to walk at all.
+
+So tune this against the game you actually play, by raising it until the
+character moves at rest, and expect the answer to differ per game. The cost is
+dynamic range: at 0.5 the bike owns only the top half of the scale, and in
+Helldivers 2 that reads as the difference between a slow stroll and a jog rather
+than a doubling of speed. If the top end feels flat, the knob to reach for is
+`--movement-max`, not this one.
+
 A stale or frozen bike drops **to the baseline, not to zero**. The invariant that
 matters is that a broken bike never grants more movement than a working one, and
 that holds exactly: a dead bike gives what a live bike gives at 0 W. It is safe
 to relax the hard stop because the scale multiplies the *physical* stick — an
-unattended rig does not move, because 0 × 0.25 is still 0.
+unattended rig does not move, because 0 × 0.5 is still 0.
 
 The cost is that a fault no longer announces itself by stopping you, so one
 fires a haptic cue instead (see below). Set `MOVEMENT_FLOOR=0` for strict
@@ -425,7 +442,7 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--movement` | `none` | scale the left stick by effort: `power`, `cadence`, or `none` |
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
-| `--movement-floor` | 0.25 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
+| `--movement-floor` | 0.5 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
 | `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen; 0 disables |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
