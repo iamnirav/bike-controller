@@ -139,13 +139,23 @@ class MovementConfig:
     min_value: float = 0.0
     max_value: float = 130.0
     # The BASELINE: the multiplier you always have, at any effort including
-    # none. 0.25 means the controller alone gives you a quarter-speed walk and
-    # the bike buys the rest, so 0 W maps to 0.25 and max_value maps to 1.0.
+    # none. 0.5 means the controller alone gives you a slow walk and the bike
+    # buys the rest, so 0 W maps to 0.5 and max_value maps to 1.0.
     #
     # This is what makes bike-side faults degrade instead of strand you: the
     # console's restart delay, a freeze, or a dropped link all leave you moving
     # slowly rather than stuck. 0.0 restores strict pedal-or-nothing.
-    floor: float = 0.25
+    #
+    # Why 0.5 and not something smaller: the number has to clear the DOWNSTREAM
+    # deadzone, and the game's is the one that counts. Games apply a radial
+    # deadzone and rescale what is left, so a floor just above it arrives as
+    # nearly nothing -- the first default, 0.25, sat one point above the XInput
+    # recommended 0.2395 and produced ~1.4% of movement. Worse, the movement
+    # stick is commonly deadzoned far harder than the aim stick: measured in
+    # Helldivers 2 with its own deadzone slider off, the RIGHT stick registered
+    # at 0.1 while the LEFT stick needed roughly half deflection to walk at all.
+    # Tune this against a game, not against the arithmetic.
+    floor: float = 0.5
     sprint_at: float | None = None         # same units as `source`
     # Sprint releases below sprint_at * this. Without hysteresis, effort
     # fluctuating around the threshold makes the sprint button chatter on and
@@ -305,7 +315,7 @@ class Mapper:
             # movement than a working one, and this preserves it exactly: a dead
             # bike gives what a live bike gives at 0 W. It is safe to relax the
             # hard stop because movement_scale multiplies the PHYSICAL stick --
-            # an unattended rig does not move, because 0 x 0.25 is still 0.
+            # an unattended rig does not move, because 0 x 0.5 is still 0.
             #
             # The cost is that a fault no longer announces itself by stopping
             # you; output_loop fires a haptic cue instead. With floor 0 this is
