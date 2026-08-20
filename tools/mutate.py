@@ -107,6 +107,112 @@ MUTANTS = [
     ("bike_controller/sequence.py", "held stick re-fires its token",
      "        if direction != previous:",
      "        if direction:"),
+
+    # --- web config -------------------------------------------------------
+    # The safety net that keeps a request from ending a ride. bridge.py's
+    # on_task_done treats any escaped exception as fatal, so this is not
+    # defensive clutter -- narrowing it is a stopped ride.
+    ("bike_controller/webconfig.py", "a raising handler takes the bridge down",
+     "        except Exception as exc:                                   # noqa: BLE001\n"
+     "            # Deliberately swallowed. See the module docstring: this coroutine",
+     "        except ZeroDivisionError as exc:\n"
+     "            # Deliberately swallowed. See the module docstring: this coroutine"),
+    # The allowlist is the whole security argument for an unauthenticated page.
+    ("bike_controller/configfile.py", "config.env writer accepts any key",
+     "        if dial is None:\n"
+     "            raise DialError(f\"{key} is not a configurable dial\")",
+     "        if dial is None:\n"
+     "            continue"),
+    # A shell sources top to bottom, so editing the first assignment leaves the
+    # file looking changed and behaving identically.
+    ("bike_controller/configfile.py", "config.env writer edits the first assignment",
+     "        if match and last_line_for.get(match.group(\"key\")) == index:",
+     "        if match and match.group(\"key\") in remaining:"),
+    # Validate everything before applying anything: a half-applied batch leaves
+    # a config the rider never asked for.
+    ("bike_controller/webconfig.py", "a rejected POST still half-applies",
+     "        problems = self._would_break(coerced)\n"
+     "        if problems:",
+     "        problems = []\n"
+     "        if problems:"),
+    # The three checks that stand in for a password on an unauthenticated page.
+    ("bike_controller/webconfig.py", "cross-site POST accepted (Host unchecked)",
+     "        if not self._is_local_host(host):",
+     "        if False:"),
+    ("bike_controller/webconfig.py", "cross-origin POST accepted (Origin unchecked)",
+     "        if origin and self._hostname(origin) != self._hostname(host):",
+     "        if False:"),
+    ("bike_controller/webconfig.py", "form POST accepted (Content-Type unchecked)",
+     "            if content_type.split(\";\")[0].strip().lower() != \"application/json\":",
+     "            if False:"),
+    # Restart-required dials with no value make the page invent one.
+    ("bike_controller/webconfig.py", "restart dials report no value at all",
+     "        saved = self._restart_dial_values()",
+     "        saved = {}"),
+    # Without `running`, the page cannot tell "you changed this, restart to
+    # apply" from "this is in force".
+    ("bike_controller/webconfig.py", "page cannot tell saved from running",
+     "                \"running\": (None if dial.live\n"
+     "                            else self.restart_values.get(dial.key)),",
+     "                \"running\": None,"),
+    # config.env is documentation as much as configuration.
+    ("bike_controller/configfile.py", "rewrite drops trailing comments and export",
+     "            out.append(match.group(\"prefix\") + remaining.pop(key)\n"
+     "                       + (match.group(\"comment\") or \"\"))",
+     "            out.append(f\"{key}={remaining.pop(key)}\")"),
+    # A truncated config.env is a Pi that does not come back.
+    ("bike_controller/configfile.py", "config.env written in place, not renamed",
+     "        os.replace(handle.name, path)",
+     "        open(path, \"w\", encoding=\"utf-8\").write(rendered)"),
+    # Clickjacking is the one cross-site path that looks identical to a real
+    # user, because the request IS made by the real page.
+    ("bike_controller/webconfig.py", "page can be framed by a hostile site",
+     "            f\"X-Frame-Options: DENY\\r\\n\"",
+     "            f\"\""),
+    # One stray byte in a hand-edited config.env used to kill the whole page.
+    ("bike_controller/configfile.py", "config.env must be valid UTF-8",
+     "        with open(path, \"r\", encoding=\"utf-8\", errors=\"surrogateescape\") as handle:",
+     "        with open(path, \"r\", encoding=\"utf-8\") as handle:"),
+    # A symlinked config.env silently severed on the first slider move.
+    ("bike_controller/configfile.py", "symlinked config.env replaced, not followed",
+     "    path = os.path.realpath(path)",
+     "    path = path"),
+    # Overlapping saves are a read-modify-write race on config.env.
+    ("bike_controller/webconfig.py", "concurrent saves race on config.env",
+     "            async with self._save_lock:\n"
+     "                await asyncio.to_thread(write_values, self.config_path, coerced)",
+     "            await asyncio.to_thread(write_values, self.config_path, coerced)"),
+    # A restart dial that snaps back while saving anyway denies a change it
+    # has already written to disk.
+    ("bike_controller/webconfig.py", "saved restart value loses to the startup one",
+     "        values = dict(self.restart_values)\n"
+     "        values.update(self._persisted_values())",
+     "        values = self._persisted_values()\n"
+     "        values.update(self.restart_values)"),
+    # Unbounded connections at Nice=-10, competing with the BLE poll loop.
+    ("bike_controller/webconfig.py", "connection cap removed",
+     "        if self._connections >= MAX_CONNECTIONS:",
+     "        if False:"),
+    ("bike_controller/webconfig.py", "connection counter leaks",
+     "            self._connections -= 1",
+     "            pass"),
+    # bool is a subclass of int: {"FROZEN_AFTER": false} would coerce to 0.0,
+    # which is in range and means "disabled".
+    ("bike_controller/dials.py", "JSON booleans accepted as numbers",
+     "    if isinstance(raw, bool):\n"
+     "        raise DialError(f\"{dial.key} must be a number, got {raw!r}\")",
+     "    if False:\n"
+     "        raise DialError(f\"{dial.key} must be a number, got {raw!r}\")"),
+    # config.env must stay editable by the user who owns it.
+    ("bike_controller/configfile.py", "rewritten config.env loses its owner",
+     "                    os.chown(handle.name, existing.st_uid, existing.st_gid)",
+     "                    pass"),
+    # NaN is refused by the RANGE check, because every comparison against it is
+    # false and the check is written in the positive form. Inverting it to the
+    # equivalent-looking negative form lets NaN straight through.
+    ("bike_controller/dials.py", "range check inverted, letting NaN through",
+     "    if not dial.minimum <= value <= dial.maximum:",
+     "    if value < dial.minimum or value > dial.maximum:"),
     # NOTE: uinput_ff.py's upload/erase handshake is deliberately NOT mutated
     # here. Exercising it needs a real /dev/uinput and a kernel, which this
     # harness does not have -- a mutant that can never be killed is noise, not

@@ -428,7 +428,10 @@ threshold — it is not a toggle or a click, so configure games for
 
 ## Configuration
 
-All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
+Flags are the underlying surface. Day to day you set these in `config.env` —
+`tools/run-bridge.sh` turns it into the argument list — or, for the tuning
+dials, from [the config page](#the-config-page) on your phone, which applies
+them live and writes them back to `config.env`.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -443,6 +446,9 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
 | `--movement-floor` | 0.5 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
+| `--web-port` | 0 (off) | serve [the config page](#the-config-page) on this port; `run-bridge.sh` passes 8080 |
+| `--web-bind` | `0.0.0.0` | address the config page listens on |
+| `--config-file` | `./config.env` | where the page persists dial changes |
 | `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen; 0 disables |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
@@ -483,6 +489,128 @@ mid-fight.
 default 3.0). Higher is snappier and jitterier. Even at 2.56 Hz, raw cadence is
 too steppy to drive an axis directly. Note this applies to the *cadence* axis
 and the gate only — movement scale is deliberately unsmoothed, see above.
+
+---
+
+## The config page
+
+The bridge serves a phone-friendly page on port 8080:
+
+```
+http://pi-2.local:8080
+```
+
+Every tuning dial is a slider. The ones that matter most take effect **on the
+next output frame** — you drag the movement floor while pedalling, in the game,
+and feel the change immediately. Values are also written back to `config.env`,
+so what you tuned on the bike is what starts next boot.
+
+This exists because the important numbers cannot be judged any other way.
+`MOVEMENT_FLOOR` has to clear a deadzone you cannot see, in a game whose left
+stick is deadzoned harder than its right; the first default was picked from
+arithmetic and produced about 1.4% of movement. Every guess used to cost an SSH
+session, an edit, a restart that drops the BLE link and the virtual pad, and
+another ride.
+
+| Dial | Live? | Meaning |
+|---|---|---|
+| `MOVEMENT_MAX` | yes | effort giving full stick deflection, watts |
+| `MOVEMENT_MIN` | yes | effort at which movement starts |
+| `MOVEMENT_FLOOR` | yes | baseline multiplier at any effort including none |
+| `SPRINT_AT` | yes | effort holding the sprint button; can be switched off |
+| `FROZEN_AFTER` | yes | freeze-guard window; 0 disables |
+| `POLL_INTERVAL` | restart | BLE poll spacing |
+| `FRAME_RATE` | restart | virtual pad output rate |
+| `RUMBLE_PASSTHROUGH` | restart | force feedback is advertised at pad creation |
+| `RIDE_LOG` | restart | ride CSV logging |
+
+Live dials work because `Mapper` re-reads its config dataclasses every
+`evaluate()` rather than caching them, so assigning to one lands between frames.
+The restart-required four cannot: `POLL_INTERVAL` in particular stays on the
+slow path deliberately, because the staleness window is *derived* from it and
+that window is the fail-safe that stops a dead bike granting movement.
+
+The page also shows live watts, cadence, move scale and telemetry rate. That is
+not decoration — tuning the floor without watching `move` is guesswork.
+
+A restart-required dial has **two** values, and the page shows both: what it is
+set to (the slider, which is what the next boot will use) and what this process
+is actually running (`running 60 Hz — restart to apply`). Collapsing those into
+one number is how the control managed to lie in both directions during review —
+first claiming the file's value was in force, then snapping the rider's own edit
+back while still saving it to `config.env`.
+
+**Adding a dial** is one entry in `DIALS` in `bike_controller/dials.py`. That
+one row is its env-var name, bounds, units, label, and — via a dotted path —
+where it lives in `MappingConfig`. The page, the validation, the persistence and
+`bridge.py`'s own argument checking all read it, so there is nowhere for a
+second copy of the bounds to drift. Gate and axis thresholds are not listed
+today only because `--movement power` makes gating inactive on this rig; each is
+one row away.
+
+### Security posture
+
+There is no password. It listens on the LAN, and the stakes are how hard you
+have to pedal.
+
+The allowlist and the range checks bound what a request can *do*:
+
+- Only keys in `DIALS` can be written. `XBOX_CONSOLE_ID`, `BIKE_ADDRESS` and
+  `RIDE_LOG_DIR` are structurally unreachable — the console ID is the one secret
+  in the checkout.
+- Every value is range-checked against the same table `bridge.py` validates
+  against, including the fail-safe-adjacent ones. There is no request that sets
+  a freeze guard of 0.1s or a floor of 1.0.
+- Exactly one file is ever served, from a constant path.
+
+On their own those are not enough, and it is worth being precise about why.
+They assume the attacker has to *be* on the LAN — and a browser defeats that
+assumption. Any web page the rider opens on any device on the network can send
+cross-origin requests to this port, and a `no-cors` POST is enough: it needs no
+preflight, and `POST /api/restart` needs no body at all. That path stays
+entirely inside the allowlist and the ranges while setting the dead-bike
+movement scale to full deflection with the freeze guard disabled.
+
+So three cheap checks close it, none of them authentication:
+
+| check | blocks |
+|---|---|
+| `Host` must name this machine or be a bare IP | DNS rebinding, where the attacker's own domain resolves to the Pi |
+| `Origin`, if present, must name the same host as `Host` | the ordinary cross-site request |
+| POST requires `Content-Type: application/json` | `<form>` submissions and simple (preflight-free) cross-origin requests, which cannot set it |
+| `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'` | clickjacking |
+
+That last one is not redundant, and it is the one worth understanding. A
+hostile page can embed this one in an invisible iframe and lure a tap onto a
+slider track. The POST that follows is made *by the real page*, so its `Host`,
+`Origin` and `Content-Type` are all genuinely correct and the first three
+checks all pass. Clickjacking is the only cross-site path that is
+indistinguishable from a real user, so it has to be refused at the framing
+layer instead.
+
+`curl` still works — no `Origin` and a bare IP are both fine — though a POST
+needs `-H 'Content-Type: application/json'`. What no longer works is a page you
+did not open on purpose.
+
+The `Host` check is exact, so reach the Pi by its own name (`pi-2.local`, with
+or without a trailing dot) or by its IP. If your router publishes it under a
+different name, use the IP.
+
+Set `WEB_PORT=0` in `config.env` if you would rather nothing listened.
+
+### Two things worth knowing
+
+**`config.env` now has two authors.** The Pi is the source of truth for tuning,
+so `tools/deploy.sh` will start reporting that `config.env` differs from your
+laptop's. That is correct, not a fault.
+
+**A request must never be able to end a ride.** `on_task_done` in `bridge.py`
+treats any task exception as fatal — right for the output loop, catastrophic for
+a web handler, since it would mean a phone browser stopping a session
+mid-firefight. Every connection is handled inside a blanket `except`, a bind
+failure at startup logs and leaves the server off, and
+`test_a_raising_handler_does_not_kill_the_server` pins the property rather than
+trusting it.
 
 ---
 
@@ -544,9 +672,14 @@ bike_controller/
   gamepad.py   virtual pad output (uinput) + physical controller input (evdev)
   mapping.py   cadence -> gate/axis/buttons. No BLE or evdev dependency.
   sequence.py  Konami-code matcher (KMP). No BLE or evdev imports either.
+  dials.py     the tunable dials, described once: bounds, units, live-or-not
+  configfile.py  rewrites config.env in place, preserving comments
+  webconfig.py   the config page's server. Stdlib asyncio, no dependency.
+web/           the config page (one self-contained file, no CDN, no build)
 tools/         scan, probe, live readout, controller inspector, gamepad test,
                bridge, remoteplay (drives Chromium via DevTools Protocol)
-tests/         33 tests: mapping incl. the fail-safe, sequence, haptic cues
+tests/         mapping incl. the fail-safe, sequence, haptic cues, dials,
+               config.env rewriting, and the web server over a real socket
 systemd/       service unit
 udev/          rule hiding the physical pad from browsers
 ```
@@ -750,8 +883,10 @@ not in `config.env` can still be passed directly for one-off experiments.
   still noticeable a filter is the remaining option — and it costs lag.
 - **Tune the thresholds against real rides.** `--movement-max` and `--sprint-at`
   are calibrated from one capture at low resistance.
-- **A cheap screen or a phone tap** if the Konami launcher ever proves flaky;
-  today it is the only way to start Remote Play without VNC.
+- **Starting Remote Play from the phone.** The config page is already served
+  and already reachable from the saddle, so a launch button there would remove
+  the Konami code as the only non-VNC way in. The page has no such control
+  today.
 
 ## What install.sh does
 

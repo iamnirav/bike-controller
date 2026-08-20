@@ -13,13 +13,18 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -f "$REPO/config.env" ] && . "$REPO/config.env"
 
 : "${MOVEMENT_MAX:=75}"
-: "${SPRINT_AT:=100}"
+: "${MOVEMENT_MIN:=0}"
+# No colon, deliberately: `:=` treats an EMPTY value as unset, and empty is how
+# config.env spells "sprint off" after you turn it off on the web page. With
+# `:=` that setting would silently come back as 100 W on the next restart.
+: "${SPRINT_AT=100}"
 : "${POLL_INTERVAL:=0.05}"
 : "${RUMBLE_PASSTHROUGH:=1}"
 : "${RIDE_LOG:=1}"
 : "${FRAME_RATE:=60}"
 : "${FROZEN_AFTER:=4}"
 : "${MOVEMENT_FLOOR:=0.5}"
+: "${WEB_PORT:=8080}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 # The real home, not /home/<user>: correct for root and for any account
 # whose home is elsewhere.
@@ -28,16 +33,20 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 args=(
     --movement power
     --movement-max "$MOVEMENT_MAX"
-    --sprint-at "$SPRINT_AT"
+    --movement-min "$MOVEMENT_MIN"
     --movement-floor "$MOVEMENT_FLOOR"
     --poll-interval "$POLL_INTERVAL"
     --frame-rate "$FRAME_RATE"
     --frozen-after "$FROZEN_AFTER"
     --launch-on-input "$REPO/tools/start-remoteplay.sh"
+    --web-port "$WEB_PORT"
+    --config-file "$REPO/config.env"
     --status
 )
 # Omitted entirely when blank, so the bridge discovers the bike by BLE name.
 [ -n "${BIKE_ADDRESS:-}" ] && args+=(--address "$BIKE_ADDRESS")
+# Likewise: blank means sprint is off, not "use the default".
+[ -n "${SPRINT_AT}" ] && args+=(--sprint-at "$SPRINT_AT")
 [ "$RUMBLE_PASSTHROUGH" != "0" ] && args+=(--rumble-passthrough)
 [ "$RIDE_LOG" != "0" ] && args+=(--ride-log "$RIDE_LOG_DIR")
 

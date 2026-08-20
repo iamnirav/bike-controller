@@ -52,7 +52,7 @@ health() {
         fail "FATAL in this invocation"
     fi
     sudo journalctl -u "$UNIT" _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat \
-        | grep -E '^(Movement|Sprint|Fail-safe|Haptics|Ride log|Watchdog|Launch trigger|Rumble)' \
+        | grep -E '^(Movement|Sprint|Fail-safe|Haptics|Ride log|Watchdog|Launch trigger|Rumble|Web config)' \
         | sed 's/^/    /' || true
     echo "    healthy"
 }
