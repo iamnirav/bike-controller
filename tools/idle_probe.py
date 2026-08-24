@@ -32,11 +32,18 @@ WHAT THIS TOOL ADDS:
 
 RIDING SCRIPT (do this 5-6 times per run, and keep every run identical):
 
-    pedal steadily ~15s -> stop dead -> count 2 -> pedal HARD and CONTINUOUSLY
-    until the numbers come back -> keep pedalling 10s
+    pedal steadily ~15s -> stop dead -> WAIT FOR THE BLACKOUT TO ACTUALLY START
+    -> pedal HARD and CONTINUOUSLY until the numbers come back -> 10s more
 
-Stopping dead and then pedalling hard is what makes the trial readable: the
-distance delta across the blackout then proves you were pedalling through it.
+The wait is the part that is easy to get wrong. The console does not blank the
+moment you stop; there is a delay first, and the console beeps when it blanks.
+Resume before that and the trial measures nothing, because there was no
+blackout to pedal through. Wait for the beep -- or for this tool to print
+"blackout #N began", which is the same instant -- and only then pedal.
+
+Pedalling hard through it is what makes the trial readable: the distance delta
+across the window then proves the wheel was turning the whole time. A trial
+where you sat still is reported as unusable rather than averaged in.
 """
 
 from __future__ import annotations
@@ -170,7 +177,8 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
             f"Connected. poke={args.poke} "
             f"({len(packets)} packet{'s' if len(packets) != 1 else ''}), "
             f"fires {args.poke_after:.1f}s into each blackout.\n"
-            "Pedal ~15s, stop dead, count 2, then pedal HARD until it comes back.\n"
+            "Pedal ~15s, stop dead, WAIT for the beep (or for the blackout line\n"
+            "below), and only then pedal HARD until the numbers come back.\n"
             "Ctrl-C when you have 5-6 trials.\n"
         )
         started = time.monotonic()
