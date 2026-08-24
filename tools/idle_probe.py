@@ -490,8 +490,10 @@ def main() -> int:
              "short, 'freeze' asks whether the console can be kept out of it",
     )
     parser.add_argument(
-        "--poke-after", type=float, default=1.0,
-        help="seconds into the blackout before poking (default 1.0)",
+        "--poke-after", type=float, default=None,
+        help="seconds into the chosen phase before poking. Defaults to 1.0 for "
+             "--poke-on blackout and 0.2 for freeze, because the freeze is only "
+             "~2.0s long and detecting it has already spent ~0.8s of that",
     )
     parser.add_argument(
         "--out", default=None,
@@ -503,6 +505,12 @@ def main() -> int:
              "then exit. Does not touch the bike.",
     )
     args = parser.parse_args()
+    if args.poke_after is None:
+        # Phase 2 is ~4.5s, so 1.0s in leaves plenty to watch. Phase 1 is ~2.0s
+        # and two samples have gone before it is even recognised, so the same
+        # delay there would land the poke on the beep -- after the console has
+        # already decided, which is the one thing this mode exists to beat.
+        args.poke_after = 1.0 if args.poke_on == "blackout" else 0.2
     if args.analyse:
         return analyse(args.analyse)
     sys.stdout.reconfigure(line_buffering=True)
