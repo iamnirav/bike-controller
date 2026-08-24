@@ -20,6 +20,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${FRAME_RATE:=60}"
 : "${FROZEN_AFTER:=4}"
 : "${MOVEMENT_FLOOR:=0.5}"
+: "${MOVEMENT_GRACE:=5}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 # The real home, not /home/<user>: correct for root and for any account
 # whose home is elsewhere.
@@ -30,6 +31,7 @@ args=(
     --movement-max "$MOVEMENT_MAX"
     --sprint-at "$SPRINT_AT"
     --movement-floor "$MOVEMENT_FLOOR"
+    --movement-grace "$MOVEMENT_GRACE"
     --poll-interval "$POLL_INTERVAL"
     --frame-rate "$FRAME_RATE"
     --frozen-after "$FROZEN_AFTER"
