@@ -714,6 +714,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="baseline multiplier you always have, at any effort "
                              "including none (default 0.5). 0 = strict "
                              "pedal-or-nothing.")
+    parser.add_argument("--movement-grace", type=float, default=5.0,
+                        help="seconds to hold the last live scale while the "
+                             "console is blacked out (default 5.0, matching its "
+                             "own lockout). Stopping pedalling makes the console "
+                             "pause and report zeros for ~5s, discarding any "
+                             "pedalling during it. 0 = no hold, plain floor.")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")
     parser.add_argument("--sprint-button", default="BTN_THUMBL",
@@ -806,6 +812,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
         min_value=args.movement_min,
         max_value=args.movement_max,
         floor=args.movement_floor,
+        blackout_grace=args.movement_grace,
         sprint_at=args.sprint_at,
     )
 
@@ -903,8 +910,10 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     movement = config.movement
     if movement.enabled:
         floor = f", floor {movement.floor:.2f}" if movement.floor else ""
+        grace = (f", holding {movement.blackout_grace:.0f}s through the "
+                 f"console's pause" if movement.blackout_grace > 0 else "")
         print(f"Movement: left stick scaled by {movement.source} "
-              f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
+              f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}{grace}")
     else:
         print("Movement: off")
 

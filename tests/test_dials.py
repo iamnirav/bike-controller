@@ -5,6 +5,7 @@ Runs with pytest, or standalone:  python3 tests/test_dials.py
 dials.py has no BLE, evdev or HTTP dependency, so this runs anywhere.
 """
 
+import ast
 import os
 import sys
 
@@ -344,6 +345,43 @@ def test_run_bridge_passes_every_dial_it_can():
         assert f"${{{dial.key}" in script or f"${dial.key}" in script, (
             f"run-bridge.sh passes {flag} but never reads ${dial.key} "
             "from config.env")
+
+
+def test_bridge_defines_a_flag_for_every_dial_that_claims_one():
+    """A dial whose `arg` names a flag bridge.py does not define is a crash.
+
+    build_settings() does getattr(args, dial.arg) over the whole table, so the
+    parser missing one flag is an AttributeError during startup -- not a bad
+    value, a bridge that cannot boot at all. It reached the Pi exactly once,
+    when a merge resolved bridge.py to this branch's side and dropped a flag
+    main had added while the dial referring to it survived.
+
+    Inspected with ast rather than imported: bridge.py imports evdev, which is
+    Linux-only, so test_cues.py already reads it this way.
+    """
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "tools", "bridge.py")) as handle:
+        tree = ast.parse(handle.read())
+
+    defined = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if arg.value.startswith("--"):
+                        # argparse's own dest derivation, so the comparison is
+                        # against what getattr will actually look for.
+                        defined.add(arg.value[2:].replace("-", "_"))
+
+    for dial in DIALS:
+        if dial.arg is None:
+            continue
+        assert dial.arg in defined, (
+            f"{dial.key} declares arg={dial.arg!r}, but bridge.py defines no "
+            f"--{dial.arg.replace('_', '-')}. build_settings() will raise "
+            "AttributeError and the bridge will not start.")
 
 
 if __name__ == "__main__":
