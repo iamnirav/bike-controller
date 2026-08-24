@@ -700,6 +700,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="baseline multiplier you always have, at any effort "
                              "including none (default 0.5). 0 = strict "
                              "pedal-or-nothing.")
+    parser.add_argument("--movement-grace", type=float, default=5.0,
+                        help="seconds to hold the last live scale while the "
+                             "console is blacked out (default 5.0, matching its "
+                             "own lockout). Stopping pedalling makes the console "
+                             "pause and report zeros for ~5s, discarding any "
+                             "pedalling during it. 0 = no hold, plain floor.")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")
     parser.add_argument("--sprint-button", default="BTN_THUMBL",
@@ -769,6 +775,12 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"--movement-min ({args.movement_min})")
     if not 0.0 <= args.movement_floor < 1.0:
         parser.error("--movement-floor must be in [0.0, 1.0)")
+    if args.movement_grace < 0:
+        parser.error(
+            f"--movement-grace ({args.movement_grace}) must be 0 (disabled) or "
+            "positive. It holds the last live scale through the console's ~5s "
+            "pause; longer than that keeps holding after real telemetry is back, "
+            "which no longer has anything to do with the blackout.")
     if args.frozen_after < 0 or 0 < args.frozen_after < 2.5:
         parser.error(
             f"--frozen-after ({args.frozen_after}) must be 0 (disabled) or at "
@@ -795,6 +807,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
         min_value=args.movement_min,
         max_value=args.movement_max,
         floor=args.movement_floor,
+        blackout_grace=args.movement_grace,
         sprint_at=args.sprint_at,
     )
 

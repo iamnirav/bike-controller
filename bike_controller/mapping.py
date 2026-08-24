@@ -156,6 +156,26 @@ class MovementConfig:
     # at 0.1 while the LEFT stick needed roughly half deflection to walk at all.
     # Tune this against a game, not against the arithmetic.
     floor: float = 0.5
+    # Seconds to hold the last live scale when the console blacks out.
+    #
+    # Stopping pedalling makes the console PAUSE: it reports cadence 0, power 0
+    # and distance 0 for about five seconds, and pedalling during that window is
+    # measured but discarded (the distance accumulator advances 27-43 counts
+    # across it while telemetry reads zero). It is not a fault and there is no
+    # way to switch it off -- the manual documents it, and re-init, keep-alives
+    # and resistance commands were all tried and do nothing.
+    #
+    # So the numbers say nothing for five seconds, and the honest options are to
+    # assume the rider stopped or to assume they are still going. Assuming they
+    # stopped costs a sprint they cannot start; assuming they are going costs
+    # movement they did not ask for. This holds the last live value instead --
+    # which is safe because movement_scale multiplies the PHYSICAL stick, so a
+    # centred stick still gives zero. The failure mode is not a runaway rig, it
+    # is only "I was holding forward while resting".
+    #
+    # 5.0 matches the console's own lockout, so the hold ends about when real
+    # telemetry returns. 0 disables it and restores the plain floor.
+    blackout_grace: float = 5.0
     sprint_at: float | None = None         # same units as `source`
     # Sprint releases below sprint_at * this. Without hysteresis, effort
     # fluctuating around the threshold makes the sprint button chatter on and
@@ -247,6 +267,11 @@ class Mapper:
         self._sprinting = False
         self._at_max = False
         self._have_distance = False
+        # None until the first live reading: at startup an untouched bike
+        # reports zeros, and holding a scale we never measured would serve 0.0
+        # for the grace window -- worse than the floor it replaces.
+        self._last_live_scale: float | None = None
+        self._blackout_since: float | None = None
         self._last_reading: tuple | None = None
         self._reading_changed_at: float | None = None
         self._frozen_reported = False
@@ -299,7 +324,7 @@ class Mapper:
         now = time.monotonic() if now is None else now
         return (now - self._reading_changed_at) > self.config.frozen_after
 
-    def _movement(self, stale: bool) -> tuple[float, bool, bool]:
+    def _movement(self, stale: bool, now: float) -> tuple[float, bool, bool]:
         """Return (scale, sprint, at_max). Raw and unsmoothed by design."""
         movement = self.config.movement
         if not movement.enabled:
@@ -321,6 +346,25 @@ class Mapper:
             # you; output_loop fires a haptic cue instead. With floor 0 this is
             # the old hard stop.
             return movement.floor, False, False
+
+        # The console's pause, seen from here: live frames still arriving, but
+        # carrying nothing at all. Distance is deliberately not part of the test
+        # -- it reads 0 on an untouched bike too, so it adds no discrimination.
+        blacked_out = self._power_raw <= 0 and self._cadence_raw <= 0
+        if not blacked_out:
+            self._blackout_since = None
+        else:
+            if self._blackout_since is None:
+                self._blackout_since = now
+            if (movement.blackout_grace > 0
+                    and self._last_live_scale is not None
+                    and now - self._blackout_since < movement.blackout_grace):
+                # Sprint is deliberately NOT held through the grace. Holding the
+                # scale keeps the stick where it was; latching a BUTTON on no
+                # evidence is a bigger promise, and releasing it is the quieter
+                # way to be wrong.
+                self._sprinting = False
+                return self._last_live_scale, False, self._at_max
 
         value = self._power_raw if movement.source == "power" else self._cadence_raw
 
@@ -347,6 +391,11 @@ class Mapper:
         else:
             self._at_max = fraction >= 1.0
 
+        # Recorded after the blackout test, so it only ever holds a scale
+        # computed from telemetry the console actually stood behind. During the
+        # ~2s freeze the console repeats its last live reading, so this captures
+        # that -- which is exactly the value worth holding.
+        self._last_live_scale = scale
         return scale, self._sprinting, self._at_max
 
     def _update_gate(self, cadence: float, now: float, stale: bool) -> bool:
@@ -393,7 +442,7 @@ class Mapper:
         stale = self.tracker.is_stale(now) or frozen
         out.gate_open = self._update_gate(cadence, now, stale)
         out.power = self._power_raw
-        out.movement_scale, out.sprint, out.at_max = self._movement(stale)
+        out.movement_scale, out.sprint, out.at_max = self._movement(stale, now)
         out.degraded = stale
 
         axis = self.config.axis

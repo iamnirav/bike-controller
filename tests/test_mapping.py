@@ -613,6 +613,139 @@ def test_gate_disabled_always_passes():
     assert mapper.evaluate(now=0.0).gate_open is True
 
 
+
+def _grace_mapper(grace=5.0, floor=0.5, maximum=100.0):
+    """A power-scaled mapper with the blackout grace configured."""
+    return Mapper(MappingConfig(
+        gate=GateConfig(enabled=False),
+        movement=MovementConfig(enabled=True, source="power", min_value=0.0,
+                                max_value=maximum, floor=floor,
+                                blackout_grace=grace),
+    ))
+
+
+def test_blackout_holds_the_last_live_scale():
+    """The console reports zeros for ~5s after you stop and discards any
+    pedalling during it. Dropping to the floor there costs a sprint the rider
+    cannot start; this holds what they last actually earned."""
+    m = _grace_mapper()
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    assert m.evaluate(now=0.0).movement_scale == 1.0
+
+    # Console pauses: live frames, all zeros.
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    assert m.evaluate(now=1.0).movement_scale == 1.0
+    m.submit(cadence_rpm=0, power_w=0, now=4.0, distance=0)
+    assert m.evaluate(now=4.0).movement_scale == 1.0
+
+
+def test_grace_expires_back_to_the_floor():
+    m = _grace_mapper(grace=5.0, floor=0.5)
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    m.evaluate(now=0.0)
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    m.evaluate(now=1.0)
+    # 5s after the blackout BEGAN (t=1.0), not after the last live sample.
+    m.submit(cadence_rpm=0, power_w=0, now=6.01, distance=0)
+    assert m.evaluate(now=6.01).movement_scale == 0.5
+
+
+def test_grace_holds_a_partial_scale_not_full_deflection():
+    """It holds what was earned, not 1.0 -- stopping while soft-pedalling must
+    not hand out more movement than the pedalling did."""
+    m = _grace_mapper(floor=0.5, maximum=100.0)
+    m.submit(cadence_rpm=40, power_w=50, now=0.0, distance=10)
+    earned = m.evaluate(now=0.0).movement_scale
+    assert earned == 0.75, earned          # floor 0.5 + half the headroom
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    assert m.evaluate(now=1.0).movement_scale == 0.75
+
+
+def test_resumed_telemetry_ends_the_grace_immediately():
+    m = _grace_mapper()
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    m.evaluate(now=0.0)
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    m.evaluate(now=1.0)
+    # Console comes back reporting a genuinely low effort: that must win over
+    # the held value straight away, not linger for the rest of the window.
+    m.submit(cadence_rpm=10, power_w=0, now=2.0, distance=12)
+    assert m.evaluate(now=2.0).movement_scale == 0.5
+
+
+def test_a_second_blackout_rearms_the_grace():
+    m = _grace_mapper()
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    m.evaluate(now=0.0)
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    m.evaluate(now=1.0)
+    m.submit(cadence_rpm=70, power_w=100, now=8.0, distance=20)
+    m.evaluate(now=8.0)
+    m.submit(cadence_rpm=0, power_w=0, now=9.0, distance=0)
+    assert m.evaluate(now=9.0).movement_scale == 1.0
+
+
+def test_an_untouched_bike_gets_the_floor_not_a_held_zero():
+    """At startup everything reads zero. With no live scale ever measured,
+    holding one would serve 0.0 for five seconds -- worse than the floor it
+    replaces, and on the very path where the rider has done nothing wrong."""
+    m = _grace_mapper(floor=0.5)
+    m.submit(cadence_rpm=0, power_w=0, now=0.0, distance=0)
+    assert m.evaluate(now=0.0).movement_scale == 0.5
+    m.submit(cadence_rpm=0, power_w=0, now=3.0, distance=0)
+    assert m.evaluate(now=3.0).movement_scale == 0.5
+
+
+def test_a_dead_feed_never_collects_grace():
+    """The invariant that a broken bike grants no more than a working one.
+    Silence is not a blackout, and must not be paid for like one."""
+    m = _grace_mapper(floor=0.5)
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    assert m.evaluate(now=0.0).movement_scale == 1.0
+    # No submit() at all: the link is gone, so the tracker goes stale.
+    out = m.evaluate(now=30.0)
+    assert out.movement_scale == 0.5
+    assert out.degraded
+
+
+def test_a_frozen_console_never_collects_grace():
+    """A console repeating one non-zero reading is a FAULT, and frozen folds
+    into stale. Holding its last scale would reward exactly the failure the
+    freeze guard exists to catch."""
+    m = _grace_mapper(floor=0.5)
+    for i in range(12):
+        # Bit-identical readings, arriving steadily, for well over frozen_after.
+        m.submit(cadence_rpm=51, power_w=60, now=float(i), distance=348)
+    out = m.evaluate(now=11.0)
+    assert m.is_frozen(now=11.0)
+    assert out.movement_scale == 0.5
+
+
+def test_grace_of_zero_restores_the_plain_floor():
+    m = _grace_mapper(grace=0.0, floor=0.5)
+    m.submit(cadence_rpm=70, power_w=100, now=0.0, distance=10)
+    m.evaluate(now=0.0)
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    assert m.evaluate(now=1.0).movement_scale == 0.5
+
+
+def test_sprint_is_released_during_the_grace():
+    """Holding the scale keeps the stick where it was; latching a BUTTON on no
+    evidence is a bigger promise than this feature is making."""
+    m = Mapper(MappingConfig(
+        gate=GateConfig(enabled=False),
+        movement=MovementConfig(enabled=True, source="power", min_value=0.0,
+                                max_value=100.0, floor=0.5, blackout_grace=5.0,
+                                sprint_at=80.0),
+    ))
+    m.submit(cadence_rpm=80, power_w=100, now=0.0, distance=10)
+    assert m.evaluate(now=0.0).sprint
+    m.submit(cadence_rpm=0, power_w=0, now=1.0, distance=0)
+    out = m.evaluate(now=1.0)
+    assert out.movement_scale == 1.0
+    assert not out.sprint
+
+
 if __name__ == "__main__":
     from _runner import main          # noqa: E402 - script-mode only
     main(globals())
