@@ -892,8 +892,13 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     movement = config.movement
     if movement.enabled:
         floor = f", floor {movement.floor:.2f}" if movement.floor else ""
+        # The banner is the only place the running config is visible in the
+        # journal, and selftest.sh health greps this line. A hold that cannot be
+        # confirmed from here is a hold nobody can tell is on.
+        grace = (f", holding {movement.blackout_grace:.0f}s through the "
+                 f"console's pause" if movement.blackout_grace > 0 else "")
         print(f"Movement: left stick scaled by {movement.source} "
-              f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}")
+              f"{movement.min_value:.0f}..{movement.max_value:.0f}{floor}{grace}")
     else:
         print("Movement: off")
 
