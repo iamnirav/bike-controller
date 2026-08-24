@@ -5,20 +5,31 @@
     ./.venv/bin/python tools/idle_probe.py --poke none     # baseline first
     ./.venv/bin/python tools/idle_probe.py --poke init-tail
 
-WHAT THE BLACKOUT IS (established from ride logs and probe-output.txt, before
-this tool existed -- see README "The idle blackout"):
+WHAT HAPPENS WHEN YOU STOP, in two phases (measured from four ride logs and
+probe-output.txt, and confirmed against the console's own beeps):
 
-Stop pedalling and within one sample the console reports cadence 0, power 0 AND
-distance 0. It is not a BLE dropout: notifications keep arriving on schedule,
-they just carry zeros. It is not the console powering down either -- the
-distance accumulator is preserved and comes back where it left off. The console
-simply stops *reporting* for a fixed window of roughly 4.5 seconds, and
-pedalling during that window does not shorten it.
+  Phase 1  FREEZE     ~2.0s   The console keeps reporting your last live
+                              cadence and power. Distance stops advancing --
+                              that is how you tell this apart from riding.
+                              Ends with the console's "stopping" beep.
 
-The evidence that pedalling is ignored rather than unmeasured: across four ride
-logs, blackouts of 4.1-5.0s show distance jumping 10-43 counts from the sample
-before to the sample after, which is a continuously-pedalling amount. Genuine
-rests show +2 or +3.
+  Phase 2  BLACKOUT   ~4.5s   cadence 0, power 0, distance 0. Pedalling during
+                              this is IGNORED: it neither shortens the window
+                              nor extends it. Ends with the "starting" beep.
+
+Neither phase is a BLE dropout and neither is the console powering down.
+Notifications keep arriving on schedule throughout, and the distance
+accumulator is preserved across the whole thing and resumes where it left off.
+The console is still measuring. It stops *reporting*.
+
+The evidence that phase 2 discards pedalling: across four ride logs, blackouts
+of 4.1-5.0s show distance jumping 10-43 counts from the sample before to the
+sample after, which is a continuously-turning wheel. Genuine rests show +2 or
++3. The freeze phase measured 1.66-2.44s over 34 of those (median 2.00s).
+
+Note for the bridge: during phase 1 it is feeding the game stale full
+deflection for two seconds after the rider has stopped. FROZEN_AFTER is 4s, so
+the freeze guard never fires on it.
 
 WHAT THIS TOOL ADDS:
 
@@ -27,19 +38,27 @@ WHAT THIS TOOL ADDS:
    state flag -- 0x02 while live, 0x03 while blacked out. That is a direct read
    of the state the bridge currently has to infer from zeros.
 
-2. It can POKE the console mid-blackout and measure whether the blackout ends
-   sooner than the baseline. One poke per run; compare summaries.
+2. It can POKE the console and measure whether that shortens the window. One
+   poke per run; compare summaries against a --poke none baseline.
+   --poke-on blackout fires inside phase 2 and asks "can this be cut short?".
+   --poke-on freeze fires inside phase 1 and asks the better question: "can
+   the console be stopped from entering phase 2 at all?".
+
+3. --analyse reads a capture back and reports which bytes of which frames moved
+   during a blackout the rider pedalled through. A byte that tracks pedalling
+   while the 0x31 frame reads zero would be the whole fix, with nothing written
+   to the console at all.
 
 RIDING SCRIPT (do this 5-6 times per run, and keep every run identical):
 
-    pedal steadily ~15s -> stop dead -> WAIT FOR THE BLACKOUT TO ACTUALLY START
-    -> pedal HARD and CONTINUOUSLY until the numbers come back -> 10s more
+    pedal steadily ~15s -> stop dead -> WAIT FOR THE STOPPING BEEP -> pedal
+    HARD and CONTINUOUSLY until the numbers come back -> 10s more
 
 The wait is the part that is easy to get wrong. The console does not blank the
-moment you stop; there is a delay first, and the console beeps when it blanks.
-Resume before that and the trial measures nothing, because there was no
-blackout to pedal through. Wait for the beep -- or for this tool to print
-"blackout #N began", which is the same instant -- and only then pedal.
+moment you stop -- phase 1 runs for two seconds first. Resume inside phase 1
+and the trial measures nothing, because there was no blackout to pedal
+through. Wait for the stopping beep -- or for this tool to print "blackout #N
+began", which is the same instant -- and only then pedal.
 
 Pedalling hard through it is what makes the trial readable: the distance delta
 across the window then proves the wheel was turning the whole time. A trial
@@ -52,13 +71,17 @@ import argparse
 import asyncio
 import json
 import os
+import struct
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bike_controller import IconBike                      # noqa: E402
-from bike_controller.bike import INIT_SEQUENCE, _b        # noqa: E402
+from bike_controller.bike import (                        # noqa: E402
+    CADENCE_OFFSET, DISTANCE_OFFSET, INIT_SEQUENCE, POWER_OFFSET,
+    TELEMETRY_PREFIX, TELEMETRY_SUBTYPE, _b,
+)
 
 # The `01 12 14` frame. Byte 11 is the state flag; bytes 7/12/16 carry a
 # once-per-second counter that advances while live and freezes while blacked
@@ -119,6 +142,8 @@ class Trial:
         self.distance_after: int | None = None
         self.cadence_after: int | None = None
         self.poked_at: float | None = None
+        self.poke_phase: str | None = None
+        self.freeze_start: float | None = None
 
     @property
     def duration(self) -> float | None:
@@ -141,11 +166,19 @@ class Trial:
             verdict = f"dist +{delta:<3d} (rested -- trial not usable)"
         else:
             verdict = f"dist +{delta:<3d} (pedalled through it)"
+        freeze = ""
+        if self.freeze_start is not None:
+            freeze = f"  freeze {self.start - self.freeze_start:.2f}s"
         poke = ""
         if self.poked_at is not None:
+            offset = self.poked_at - self.start
+            # A freeze-phase poke lands BEFORE the blackout starts, so its
+            # offset is negative. Say so rather than printing "+-1.20s".
+            where = (f"{offset:.2f}s into the blackout" if offset >= 0
+                     else f"{-offset:.2f}s before it, in the freeze")
             after = "" if self.end is None else f", cleared {self.end - self.poked_at:.2f}s later"
-            poke = f"  poked at +{self.poked_at - self.start:.2f}s{after}"
-        return f"  #{self.index:<2d} {dur}  {verdict}{poke}"
+            poke = f"  poked {where}{after}"
+        return f"  #{self.index:<2d} {dur}  {verdict}{freeze}{poke}"
 
 
 async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
@@ -167,6 +200,16 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
     current: Trial | None = None
     last_live_distance = 0
     poke_task: asyncio.Task | None = None
+    # Phase 1: cadence still reads live but distance has stopped advancing.
+    # Two consecutive unchanged samples, not one -- at ~2.5Hz and ~6 counts/s
+    # distance moves every sample while riding, but a single repeat is within
+    # the console's rounding and would fire this constantly.
+    freeze_start: float | None = None
+    unchanged = 0
+    last_change: float | None = None
+    # A freeze-phase poke fires before the trial it belongs to exists, so park
+    # it here and attach it when the blackout actually begins.
+    pending_poke: float | None = None
     # Everything reads zero before the first pedal stroke, which is not a
     # blackout -- it is a bike nobody is sitting on. Wait for real data.
     seen_live = False
@@ -176,12 +219,20 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
         print(
             f"Connected. poke={args.poke} "
             f"({len(packets)} packet{'s' if len(packets) != 1 else ''}), "
-            f"fires {args.poke_after:.1f}s into each blackout.\n"
+            f"fires {args.poke_after:.1f}s into each {args.poke_on}.\n"
             "Pedal ~15s, stop dead, WAIT for the beep (or for the blackout line\n"
             "below), and only then pedal HARD until the numbers come back.\n"
             "Ctrl-C when you have 5-6 trials.\n"
         )
         started = time.monotonic()
+
+        async def fire_freeze() -> None:
+            """Poke inside phase 1, betting the console has not yet decided."""
+            nonlocal pending_poke
+            await asyncio.sleep(args.poke_after)
+            pending_poke = time.monotonic()
+            print(f"      poke ({args.poke}) sent during freeze")
+            await poke()
 
         async def poke() -> None:
             for i, packet in enumerate(packets):
@@ -204,17 +255,48 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
             if not blacked_out:
                 seen_live = True
 
+            # Track phase 1 so it can be poked, and so each trial can report it.
+            if not blacked_out and seen_live:
+                if sample.distance_raw == last_live_distance:
+                    unchanged += 1
+                    if unchanged == 2 and freeze_start is None:
+                        # The freeze began when distance last MOVED, not when we
+                        # noticed. Samples arrive every ~0.4s (one 0x31 frame per
+                        # five-packet poll cycle), not every --interval.
+                        freeze_start = last_change if last_change is not None else now
+                        print("  --- freeze began (stopping beep due in ~2s) ---")
+                        if packets and args.poke_on == "freeze":
+                            poke_task = asyncio.create_task(fire_freeze())
+                else:
+                    unchanged = 0
+                    last_change = now
+                    if freeze_start is not None:
+                        # Pedalling resumed inside phase 1: no blackout follows,
+                        # so there is nothing to measure and nothing to cancel.
+                        freeze_start = None
+                        pending_poke = None
+                        if poke_task is not None:
+                            poke_task.cancel()
+                            poke_task = None
+
             if blacked_out and seen_live and current is None:
                 current = Trial(len(trials) + 1, now, last_live_distance)
+                current.freeze_start = freeze_start
+                if pending_poke is not None:
+                    current.poked_at, current.poke_phase = pending_poke, "freeze"
+                freeze_start = None
+                pending_poke = None
+                unchanged = 0
                 trials.append(current)
                 print(f"  --- blackout #{current.index} began ---")
-                if packets:
+                if packets and args.poke_on == "blackout":
                     async def fire(trial: Trial = current) -> None:
                         await asyncio.sleep(args.poke_after)
                         # The blackout may have ended while we waited; poking
                         # after recovery measures nothing and confuses the log.
                         if trial.end is None:
                             trial.poked_at = time.monotonic()
+                            trial.poke_phase = "blackout"
                             print(f"      poke ({args.poke}) sent")
                             await poke()
                     poke_task = asyncio.create_task(fire())
@@ -242,6 +324,131 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
 
     if out is not None:
         out.close()
+    return 0
+
+
+def frame_shape(data: bytes) -> str:
+    """A stable key for "frames of this kind", for grouping bytes to compare."""
+    if len(data) == 20:
+        return f"{data[0]:02x}·{data[1]:02x}·sub{data[5]:02x}"
+    return f"{data[:2].hex()} (len {len(data)})"
+
+
+class Window:
+    """One blackout, reconstructed from a capture rather than watched live."""
+
+    def __init__(self, t0: float, t1: float, dist_before: int, dist_after: int) -> None:
+        self.t0, self.t1 = t0, t1
+        self.dist_before, self.dist_after = dist_before, dist_after
+
+    @property
+    def duration(self) -> float:
+        return self.t1 - self.t0
+
+    @property
+    def distance_delta(self) -> int:
+        return self.dist_after - self.dist_before
+
+    @property
+    def pedalled_through(self) -> bool:
+        """+2/+3 is a coast-down remainder. More means the wheel kept turning."""
+        return self.distance_delta > 4
+
+
+def blackout_windows(frames: list[tuple[float, bytes]]) -> list[Window]:
+    """Every blackout that both began and ENDED inside the capture.
+
+    A blackout still running when the capture stopped has no recovery to
+    measure and no distance-after to judge it by, so it is not a window.
+    """
+    live = [(t, d) for t, d in frames
+            if len(d) == 20 and d[:4] == TELEMETRY_PREFIX and d[5] == TELEMETRY_SUBTYPE]
+    windows: list[Window] = []
+    start: float | None = None
+    before: int | None = None
+    for t, d in live:
+        zero = (d[CADENCE_OFFSET] == 0
+                and struct.unpack_from("<H", d, POWER_OFFSET)[0] == 0)
+        dist = struct.unpack_from("<H", d, DISTANCE_OFFSET)[0]
+        if zero:
+            if start is None:
+                start = t
+        else:
+            if start is not None and before is not None:
+                windows.append(Window(start, t, before, dist))
+            start = None
+            before = dist
+    return windows
+
+
+def moving_bytes(group: list[bytes]) -> list[str]:
+    """Byte positions that took more than one value across these frames."""
+    if not group:
+        return []
+    moving = []
+    for i in range(max(len(d) for d in group)):
+        values = {d[i] for d in group if len(d) > i}
+        if len(values) > 1:
+            moving.append(f"{i}({min(values)}-{max(values)})")
+    return moving
+
+
+def read_capture(path: str) -> list[tuple[float, bytes]]:
+    frames = []
+    with open(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                record = json.loads(line)
+                frames.append((record["t"], bytes.fromhex(record["hex"])))
+    return frames
+
+
+def analyse(path: str) -> int:
+    """Report which bytes moved during a blackout the rider pedalled through.
+
+    The bridge reads cadence and power out of the 0x31 frame, and the console
+    zeroes that frame for the whole of phase 2. But it sends other frames in the
+    same poll cycle. If any byte of any of them still tracks the cranks while
+    0x31 reads zero, the bridge can read THAT instead and the blackout stops
+    mattering -- no writes, no protocol guessing, no fighting the console.
+    """
+    frames = read_capture(path)
+    if not frames:
+        print(f"{path}: empty capture")
+        return 1
+
+    windows = blackout_windows(frames)
+    pedalled = [w for w in windows if w.pedalled_through]
+    print(f"{path}: {len(frames)} frames, {len(windows)} blackout(s), "
+          f"{len(pedalled)} pedalled through")
+    if not pedalled:
+        print("\n  No pedalled-through blackout in this capture, so there is nothing"
+              "\n  to look for a surviving signal in. Re-run and pedal HARD from the"
+              "\n  stopping beep until the numbers return.")
+        return 1
+
+    for index, window in enumerate(pedalled, 1):
+        print(f"\n=== blackout {index}: {window.duration:.2f}s, "
+              f"distance +{window.distance_delta} (wheel was turning) ===")
+        inside: dict[str, list[bytes]] = {}
+        for t, d in frames:
+            # Half-open on purpose: t1 is the LIVE frame that ended the
+            # blackout. Include it and the 0x31 frame always reads as "moved"
+            # -- it jumps from zero back to real values -- which is the one
+            # answer we already know and would drown the ones we do not.
+            if window.t0 <= t < window.t1:
+                inside.setdefault(frame_shape(d), []).append(d)
+        for key in sorted(inside):
+            group = inside[key]
+            moving = moving_bytes(group)
+            head = f"  {key:<20} n={len(group):<4}"
+            print(f"{head} {'moved: ' + ', '.join(moving) if moving else 'flat'}")
+
+    print("\nA byte that moves here is a candidate. Read it across the WHOLE capture"
+          "\nbefore believing it: a once-per-second tick and a stopwatch also move,"
+          "\nand neither tells you anything about the cranks. What you want is a byte"
+          "\nthat is flat while resting and moves while pedalling.")
     return 0
 
 
@@ -278,6 +485,11 @@ def main() -> int:
         help="what to write mid-blackout (default none, which is the baseline)",
     )
     parser.add_argument(
+        "--poke-on", choices=("blackout", "freeze"), default="blackout",
+        help="which phase to poke in: 'blackout' asks whether phase 2 can be cut "
+             "short, 'freeze' asks whether the console can be kept out of it",
+    )
+    parser.add_argument(
         "--poke-after", type=float, default=1.0,
         help="seconds into the blackout before poking (default 1.0)",
     )
@@ -285,7 +497,14 @@ def main() -> int:
         "--out", default=None,
         help="write every raw notification here as JSONL, for offline analysis",
     )
+    parser.add_argument(
+        "--analyse", metavar="FILE",
+        help="read a capture back and report which bytes survive a blackout, "
+             "then exit. Does not touch the bike.",
+    )
     args = parser.parse_args()
+    if args.analyse:
+        return analyse(args.analyse)
     sys.stdout.reconfigure(line_buffering=True)
 
     # Owned here, not inside run(), so the summary still prints on Ctrl-C --
