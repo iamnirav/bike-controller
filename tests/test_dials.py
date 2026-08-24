@@ -112,6 +112,7 @@ EXPECTED_BOUNDS = {
     "MOVEMENT_MAX": (20.0, 500.0),
     "MOVEMENT_MIN": (0.0, 400.0),
     "MOVEMENT_FLOOR": (0.0, 0.99),
+    "MOVEMENT_GRACE": (0.0, 15.0),
     "SPRINT_AT": (20.0, 600.0),
     "FROZEN_AFTER": (2.5, 120.0),
     "POLL_INTERVAL": (0.001, 0.5),

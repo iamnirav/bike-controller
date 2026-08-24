@@ -104,6 +104,22 @@ DIALS: tuple[Dial, ...] = (
              "the game's deadzone. 0 is strict pedal-or-nothing.",
     ),
     Dial(
+        key="MOVEMENT_GRACE", arg="movement_grace", label="Hold through pause",
+        kind="float",
+        # Capped at 15, which is 3x the pause it exists to cover. Past the
+        # console's ~5s the extra hold can only ever apply while the rider is
+        # genuinely stopped -- real telemetry ends the hold the instant it
+        # returns non-zero -- so a large value buys nothing except moving when
+        # you did not ask to. Wide enough to experiment, short of absurd.
+        minimum=0.0, maximum=15.0, step=0.5, unit="s",
+        path="movement.blackout_grace",
+        help="Stopping pedalling makes the console pause ITSELF and report "
+             "zeros for about five seconds, throwing away anything you pedal "
+             "during it. This holds your last live scale instead of dropping "
+             "to the floor, so you can move the moment you need to. It stacks "
+             "on the ~2s freeze before it. 0 is no hold.",
+    ),
+    Dial(
         key="SPRINT_AT", arg="sprint_at", label="Sprint at", kind="float",
         minimum=20.0, maximum=600.0, step=5.0, unit="W",
         path="movement.sprint_at", nullable=True,

@@ -91,9 +91,20 @@ class IconBike:
     poll loop is not an optimisation, it is the protocol.
     """
 
-    def __init__(self, address: str, poll_interval: float = 0.2) -> None:
+    def __init__(
+        self,
+        address: str,
+        poll_interval: float = 0.2,
+        on_raw=None,
+    ) -> None:
         self.address = address
         self.poll_interval = poll_interval
+        # Called with (monotonic_time, bytes) for EVERY notification, before any
+        # filtering. _on_notify keeps only 0x31 frames, which is right for the
+        # bridge and wrong for protocol work: the console also sends a `01 12 14`
+        # frame whose byte 11 is a live/paused state flag. Tools that need the
+        # whole conversation pass a hook rather than reimplementing the poll loop.
+        self.on_raw = on_raw
         self.state = BikeState()
         self.frames_received = 0
         self._client: BleakClient | None = None
@@ -133,6 +144,10 @@ class IconBike:
 
     def _on_notify(self, _char, raw: bytearray) -> None:
         data = bytes(raw)
+        if self.on_raw is not None:
+            # A misbehaving hook must not kill telemetry for the bridge.
+            with contextlib.suppress(Exception):
+                self.on_raw(time.monotonic(), data)
         if (
             len(data) != 20
             or data[:4] != TELEMETRY_PREFIX
@@ -148,6 +163,17 @@ class IconBike:
         )
         with contextlib.suppress(asyncio.QueueFull):
             self._updates.put_nowait(self.state)
+
+    async def send(self, packet: bytes) -> None:
+        """Write one raw packet on 0x1534, interleaved with the poll loop.
+
+        Exists for protocol experiments (see tools/idle_probe.py). The console
+        is request/response and single-threaded about it, so a packet sent from
+        outside the poll loop is just another request in the same queue.
+        """
+        if self._client is None:
+            raise RuntimeError("not connected")
+        await self._client.write_gatt_char(IFIT_WRITE, packet, response=True)
 
     async def _poll_forever(self) -> None:
         assert self._client is not None

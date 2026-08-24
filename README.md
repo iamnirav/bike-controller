@@ -446,6 +446,7 @@ them live and writes them back to `config.env`.
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
 | `--movement-floor` | 0.5 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
+| `--movement-grace` | 5 | seconds to hold the last live scale through the console's ~5s pause after you stop pedalling; 0 = no hold, plain floor |
 | `--web-port` | 0 (off) | serve [the config page](#the-config-page) on this port; `run-bridge.sh` passes 8080 |
 | `--web-bind` | `0.0.0.0` | address the config page listens on |
 | `--config-file` | `./config.env` | where the page persists dial changes |
