@@ -443,6 +443,7 @@ All tuning is command-line; edit `ExecStart` in the systemd unit to persist.
 | `--movement-min` | 0 | effort at which movement starts; 0 lets the game's deadzone decide |
 | `--movement-max` | 100 | effort giving full deflection (watts or rpm) |
 | `--movement-floor` | 0.5 | **baseline** multiplier you always have, at any effort including none; 0 = strict pedal-or-nothing |
+| `--movement-grace` | 5 | seconds to hold the last live scale through the console's ~5s pause after you stop pedalling; 0 = no hold, plain floor |
 | `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen; 0 disables |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
