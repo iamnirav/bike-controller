@@ -83,15 +83,16 @@ from bike_controller.bike import (                        # noqa: E402
     TELEMETRY_PREFIX, TELEMETRY_SUBTYPE, _b,
 )
 
-# The `01 12 14` frame. Byte 11 is the state flag; bytes 7/12/16 carry a
-# once-per-second counter that advances while live and freezes while blacked
-# out. Identified by diffing riding frames against idle frames in
-# probe-output.txt, so treat the names as well-evidenced hypotheses.
-STATE_PREFIX = bytes([0x01, 0x12, 0x14])
+# The console's state frame, `01 12 ...`. Byte 11 is a state flag and byte 11
+# alone is stable: 0x03 marks the blackout in every capture taken so far.
+#
+# Byte 2 is NOT part of the identity even though it looks like it -- it read
+# 0x14 in probe-output.txt and 0x1e in the first ride capture, so matching on
+# it silently stops recognising the frame. Byte 11's live value moves too
+# (0x02 then, 0x0a now), which is why only the blacked-out value is named.
+STATE_PREFIX = bytes([0x01, 0x12])
 STATE_OFFSET = 11
-STATE_LIVE = 0x02
 STATE_BLACKED_OUT = 0x03
-COUNTER_OFFSET = 7
 
 # Candidate pokes. All are writes to 0x1534, which is the only characteristic
 # the console takes commands on.
@@ -247,7 +248,7 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
 
             # Read the state flag off the most recent `01 12 14` frame.
             for t, data in reversed(frames[-12:]):
-                if len(data) == 20 and data[:3] == STATE_PREFIX:
+                if len(data) == 20 and data[:2] == STATE_PREFIX:
                     state_flag = data[STATE_OFFSET]
                     break
 
@@ -445,10 +446,16 @@ def analyse(path: str) -> int:
             head = f"  {key:<20} n={len(group):<4}"
             print(f"{head} {'moved: ' + ', '.join(moving) if moving else 'flat'}")
 
-    print("\nA byte that moves here is a candidate. Read it across the WHOLE capture"
-          "\nbefore believing it: a once-per-second tick and a stopwatch also move,"
-          "\nand neither tells you anything about the cranks. What you want is a byte"
-          "\nthat is flat while resting and moves while pedalling.")
+    print("\nA byte that moves here is a candidate, and most of them are not.")
+    print("Two known sources of noise, so you do not chase them again:")
+    print("  fe·02·*  is a header whose tail ECHOES the previous frame's bytes.")
+    print("           Its 0-255 spreads are an uncleared buffer, not data.")
+    print("  ff·11·*  byte 14 is a once-per-second clock, and byte 18 tracks it")
+    print("           at a fixed +62 offset. It runs during a REST too, so it")
+    print("           says nothing about the cranks.")
+    print("What you want is a byte that is flat while resting and moves while")
+    print("pedalling. Comparing a rested blackout with a pedalled-through one is")
+    print("the only way to tell those apart.")
     return 0
 
 
