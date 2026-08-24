@@ -197,6 +197,15 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
         if out is not None:
             out.write(json.dumps({"t": round(t, 4), "hex": data.hex()}) + "\n")
 
+    def note_poke() -> None:
+        """Writes are ours, so they never appear in the notification stream.
+        Without this the capture cannot say whether a poke fired at all, and a
+        poke that silently never fired looks exactly like one that does not
+        work."""
+        if out is not None:
+            out.write(json.dumps({"t": round(time.monotonic(), 4),
+                                  "poke": args.poke}) + "\n")
+
     state_flag: int | None = None
     current: Trial | None = None
     last_live_distance = 0
@@ -227,6 +236,22 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
         )
         started = time.monotonic()
 
+        async def keepalive() -> None:
+            """Poke on a fixed cadence, in every phase.
+
+            Reactive poking cannot win a race it starts 1.76s into a 2.0s
+            freeze -- detecting the freeze needs two samples and they arrive
+            0.78s apart. A keep-alive does not have to detect anything: if the
+            poke works at all, one has already landed before the console
+            decides.
+            """
+            while True:
+                await asyncio.sleep(args.poke_every)
+                await poke()
+
+        keepalive_task = (asyncio.create_task(keepalive())
+                          if packets and args.poke_on == "always" else None)
+
         async def fire_freeze() -> None:
             """Poke inside phase 1, betting the console has not yet decided."""
             nonlocal pending_poke
@@ -236,6 +261,7 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
             await poke()
 
         async def poke() -> None:
+            note_poke()
             for i, packet in enumerate(packets):
                 await bike.send(packet)
                 # The handshake only works at the console's own 400ms spacing;
@@ -323,6 +349,8 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
                 f"dist {sample.distance_raw:>5}  state {flag}  {mark}"
             )
 
+        if keepalive_task is not None:
+            keepalive_task.cancel()
     if out is not None:
         out.close()
     return 0
@@ -395,14 +423,29 @@ def moving_bytes(group: list[bytes]) -> list[str]:
 
 
 def read_capture(path: str) -> list[tuple[float, bytes]]:
+    """Notification frames only. A capture also holds our own poke records."""
     frames = []
     with open(path) as handle:
         for line in handle:
             line = line.strip()
             if line:
                 record = json.loads(line)
-                frames.append((record["t"], bytes.fromhex(record["hex"])))
+                if "hex" in record:
+                    frames.append((record["t"], bytes.fromhex(record["hex"])))
     return frames
+
+
+def read_pokes(path: str) -> list[float]:
+    """When we wrote to the console. Empty for a --poke none baseline."""
+    pokes = []
+    with open(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                record = json.loads(line)
+                if "poke" in record:
+                    pokes.append(record["t"])
+    return pokes
 
 
 def analyse(path: str) -> int:
@@ -421,8 +464,15 @@ def analyse(path: str) -> int:
 
     windows = blackout_windows(frames)
     pedalled = [w for w in windows if w.pedalled_through]
+    pokes = read_pokes(path)
     print(f"{path}: {len(frames)} frames, {len(windows)} blackout(s), "
-          f"{len(pedalled)} pedalled through")
+          f"{len(pedalled)} pedalled through, {len(pokes)} poke(s) written")
+    if pedalled:
+        durations = sorted(w.duration for w in pedalled)
+        mid = durations[len(durations) // 2]
+        print(f"  blackout length: median {mid:.2f}s  "
+              f"min {durations[0]:.2f}s  max {durations[-1]:.2f}s")
+        print("  " + "  ".join(f"{d:.2f}" for d in durations))
     if not pedalled:
         print("\n  No pedalled-through blackout in this capture, so there is nothing"
               "\n  to look for a surviving signal in. Re-run and pedal HARD from the"
@@ -430,8 +480,12 @@ def analyse(path: str) -> int:
         return 1
 
     for index, window in enumerate(pedalled, 1):
+        # A poke aimed at the freeze lands BEFORE the window opens, so look
+        # back far enough to catch it.
+        near = [p for p in pokes if window.t0 - 3.0 <= p <= window.t1]
         print(f"\n=== blackout {index}: {window.duration:.2f}s, "
-              f"distance +{window.distance_delta} (wheel was turning) ===")
+              f"distance +{window.distance_delta} (wheel was turning), "
+              f"{len(near)} poke(s) in/just before ===")
         inside: dict[str, list[bytes]] = {}
         for t, d in frames:
             # Half-open on purpose: t1 is the LIVE frame that ended the
@@ -492,9 +546,12 @@ def main() -> int:
         help="what to write mid-blackout (default none, which is the baseline)",
     )
     parser.add_argument(
-        "--poke-on", choices=("blackout", "freeze"), default="blackout",
-        help="which phase to poke in: 'blackout' asks whether phase 2 can be cut "
-             "short, 'freeze' asks whether the console can be kept out of it",
+        "--poke-on", choices=("blackout", "freeze", "always"), default="blackout",
+        help="when to poke. 'blackout' asks whether phase 2 can be cut short. "
+             "'freeze' asks whether the console can be kept out of it, but has "
+             "only ~0.2s of margin. 'always' pokes on a fixed cadence in every "
+             "phase, which is the only version that reliably lands before the "
+             "console decides -- and is what a real fix would look like",
     )
     parser.add_argument(
         "--poke-after", type=float, default=None,
@@ -505,6 +562,10 @@ def main() -> int:
     parser.add_argument(
         "--out", default=None,
         help="write every raw notification here as JSONL, for offline analysis",
+    )
+    parser.add_argument(
+        "--poke-every", type=float, default=1.0,
+        help="seconds between pokes in --poke-on always (default 1.0)",
     )
     parser.add_argument(
         "--analyse", metavar="FILE",

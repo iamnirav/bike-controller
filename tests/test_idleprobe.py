@@ -216,5 +216,33 @@ def test_analyse_accepts_a_pedalled_through_blackout():
         os.unlink(path)
 
 
+def test_poke_records_are_not_mistaken_for_frames():
+    """A capture holds our own writes alongside the console's notifications.
+
+    Feeding a poke record to bytes.fromhex would crash the analyser on exactly
+    the runs that have something to say -- every one where a poke fired.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+        handle.write(json.dumps({"t": 0.0, "hex": telemetry(60, 80, 100).hex()}) + "\n")
+        handle.write(json.dumps({"t": 0.2, "poke": "init-tail"}) + "\n")
+        handle.write(json.dumps({"t": 0.4, "hex": telemetry(0, 0, 0).hex()}) + "\n")
+        path = handle.name
+    try:
+        assert len(idle_probe.read_capture(path)) == 2
+        assert idle_probe.read_pokes(path) == [0.2]
+    finally:
+        os.unlink(path)
+
+
+def test_a_baseline_capture_has_no_pokes():
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+        handle.write(json.dumps({"t": 0.0, "hex": telemetry(60, 80, 100).hex()}) + "\n")
+        path = handle.name
+    try:
+        assert idle_probe.read_pokes(path) == []
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     main(globals())
