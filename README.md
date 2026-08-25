@@ -304,6 +304,24 @@ is skipped when distance is unavailable, because then a genuinely steady rider i
 indistinguishable from a stuck console and stopping a real rider is the worse
 error.
 
+**What tripping it does is narrow, and deliberately so.** It releases the
+bike-driven buttons and writes a line to the journal. It does **not** touch
+movement, and it does not buzz the controller.
+
+It used to do both, and both were wrong. The left stick is only ever the physical
+stick multiplied by the movement scale, so a lying console cannot move anyone on
+its own — there is no runaway to prevent. Meanwhile flooring a rider who is
+pedalling hard, for as long as the console chooses to stay latched, loses fights
+in a way the fault itself never would.
+
+What a latch genuinely breaks is the bike-driven buttons, which go to the pad
+whatever your hands are doing: a console stuck above `--sprint-at` holds sprint
+down for as long as it lies, with the controller untouched. A threshold `--button`
+rule is the same failure wearing a different name. Those are released; everything
+else is left alone. The buzz went too — a rumble mid-firefight is a worse
+interruption than the fault it announces, and the journal line is enough to
+diagnose it afterwards. Silence, which is a different fault, still buzzes.
+
 ### Why the lower bound is 0
 
 `--movement-min` defaults to **0**, which looks like it would let a feeble pedal
@@ -450,7 +468,7 @@ them live and writes them back to `config.env`.
 | `--web-port` | 0 (off) | serve [the config page](#the-config-page) on this port; `run-bridge.sh` passes 8080 |
 | `--web-bind` | `0.0.0.0` | address the config page listens on |
 | `--config-file` | `./config.env` | where the page persists dial changes |
-| `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen; 0 disables |
+| `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen and its held buttons are released; 0 disables |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |

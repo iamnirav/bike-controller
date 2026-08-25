@@ -225,10 +225,12 @@ class MappingConfig:
     stale_after: float | None = None
     # Seconds of bit-identical telemetry before the console is treated as
     # frozen. Observed on real hardware: it latched cadence 51 / power 60 /
-    # distance 348 and resent it unchanged for 30 seconds while the rider sat
-    # still, and the character kept walking the whole time. Frames kept
+    # distance 348 and resent it unchanged for 30 seconds. Frames kept
     # arriving, so the staleness check -- which only sees SILENCE -- never
     # fired.
+    #
+    # What tripping this does is narrow on purpose: it releases the bike-driven
+    # buttons and logs, and leaves movement alone. See evaluate() for why.
     #
     # A short freeze is normal: the console holds its last reading for ~2s at
     # the end of every pedalling stretch before zeroing. 4s clears that with
@@ -436,13 +438,30 @@ class Mapper:
             self._frozen_reported = True
             print(f"  console telemetry frozen at cadence={self._cadence_raw:.0f} "
                   f"power={self._power_raw:.0f} for >"
-                  f"{self.config.frozen_after:.1f}s -- treating as stopped",
+                  f"{self.config.frozen_after:.1f}s -- releasing held buttons",
                   flush=True)
-        # Frozen counts as stale: frames are arriving, but they carry nothing.
-        stale = self.tracker.is_stale(now) or frozen
+        # Frozen is deliberately NOT folded into stale, and deliberately does
+        # not touch movement.
+        #
+        # It used to do both: a latch dropped the scale to the floor. But the
+        # left stick is only ever the PHYSICAL stick times this scale, so a
+        # lying console cannot move anyone on its own -- and pinning a rider who
+        # is pedalling hard to the floor, for as long as the console chooses to
+        # stay latched, is a worse outcome in a game than briefly over-reading
+        # their effort. Nothing here is safety-critical enough to buy with that.
+        #
+        # What a latch genuinely breaks is the bike-driven BUTTONS below, which
+        # are written to the pad whatever the rider's hands are doing. A console
+        # latched above sprint_at holds sprint down for as long as it lies, with
+        # the controller untouched. That is the part worth fixing, and the only
+        # part.
+        stale = self.tracker.is_stale(now)
         out.gate_open = self._update_gate(cadence, now, stale)
         out.power = self._power_raw
         out.movement_scale, out.sprint, out.at_max = self._movement(stale, now)
+        # Silence still counts as degraded, which buzzes the controller. A latch
+        # does not: it is logged and left alone, because a buzz mid-firefight is
+        # a worse interruption than the fault it announces.
         out.degraded = stale
 
         axis = self.config.axis
@@ -451,8 +470,17 @@ class Mapper:
             fraction = (cadence - axis.min_rpm) / span
             out.axis = min(1.0, max(0.0, fraction))
 
-        for rule in self.config.buttons:
-            if cadence >= rule.min_rpm:
-                out.buttons.add(rule.name)
+        if frozen:
+            # Every bike-driven button, not just sprint: a threshold rule is the
+            # same failure wearing a different name, held down for as long as
+            # the console repeats the reading that opened it.
+            self._sprinting = False
+            self._at_max = False
+            out.sprint = False
+            out.at_max = False
+        else:
+            for rule in self.config.buttons:
+                if cadence >= rule.min_rpm:
+                    out.buttons.add(rule.name)
 
         return out

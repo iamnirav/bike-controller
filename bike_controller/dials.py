@@ -135,7 +135,10 @@ DIALS: tuple[Dial, ...] = (
         minimum=2.5, maximum=120.0, step=0.5, unit="s",
         path="frozen_after", disabled_value=0.0,
         help="Seconds of bit-identical telemetry before the console counts as "
-             "frozen. 0 disables. Below 2.5 it would fire every time you stop.",
+             "latched. Releases the buttons the bike was holding -- sprint "
+             "especially, which it would otherwise hold down for as long as it "
+             "lies. Leaves movement alone. 0 disables. Below 2.5 it would fire "
+             "every time you stop.",
     ),
 
     # --- Restart required --------------------------------------------------
