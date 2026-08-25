@@ -12,9 +12,11 @@ Semantics: the gate suppresses a chosen SUBSET of the real controller's inputs
 (default: the left stick, i.e. movement). Everything else passes through
 unconditionally, so menus and buttons still work while you are stopped.
 
-Bike-driven output (cadence axis, threshold buttons) is the bike's own
-contribution and always passes -- it is already zero when you are not
-pedalling, so gating it too would be redundant.
+Bike-driven output (sprint, cadence axis, threshold buttons) is the bike's own
+contribution and always passes, whatever the rider's hands are doing. Gating it
+would be redundant while the console is honest, because it is already zero when
+you are not pedalling. It is NOT self-limiting when the console latches, which
+is what the freeze guard in mapping.py exists to catch.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evdev import ecodes as e                                        # noqa: E402
 
+from bike_controller import dials as dials_module                    # noqa: E402
+from bike_controller.dials import DIALS, DialError                   # noqa: E402
 from bike_controller.gamepad import (                                # noqa: E402
     ControllerReader,
     VirtualGamepad,
@@ -87,6 +91,7 @@ class Status:
     sprint: bool = False
     game_rumble_seen: bool = False
     frames: int = 0                     # telemetry frames since start
+    hz: float = 0.0                     # telemetry rate over the last interval
     resistance: int = 0                 # raw byte, not the console's displayed level
     frozen: bool = False                # console repeating one reading
     # Set by whichever feed is running; consumed by output_loop, which logs it
@@ -201,9 +206,11 @@ KONAMI = [
 
 
 class Launcher:
-    """Runs a command when the rider first touches the controller.
+    """Runs a command on the launch trigger.
 
-    Triggered by button presses only, never axis movement -- stick drift on a
+    What counts as the trigger is decided upstream in feed_from_controller: the
+    Konami code by default, or any button press with --launch-trigger any.
+    Either way it is button presses, never axis movement -- stick drift on a
     resting controller would otherwise fire it unprompted.
 
     Self-re-arming: it declines to launch while the browser is already up, so
@@ -394,7 +401,7 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     # window: the mapper fails safe in ~1.6s, which is what
                     # protects the rider. This only decides when to spend a
                     # reconnect, which costs a BLE round trip, so it can afford
-                    # to be patient. ~26 missed frames at the deployed rate.
+                    # to be patient -- tens of missed frames, not one.
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
                     status.resistance = sample.resistance
@@ -442,9 +449,11 @@ async def feed_simulated(mapper: Mapper, status: Status) -> None:
         # Handed over the same way the real feed does, so --ride-log is
         # exercised by the smoke run rather than only ever on a real ride.
         status.pending_sample = _SimSample(round(cadence), round(power))
-        # Mirror the deployed telemetry rate (~2.56 Hz), not the original
-        # ~0.87 Hz -- otherwise the simulator runs closer to the staleness
-        # window than the real thing ever does.
+        # Roughly the real telemetry period, and deliberately not SLOWER than
+        # it: a simulator that ran closer to the staleness window than the
+        # console does would make the fail-safe look tighter than it is. (See
+        # the poll-rate caveat in the README -- the exact rate is unverified,
+        # but erring fast is the safe side of it.)
         await asyncio.sleep(0.4)
 
 
@@ -606,21 +615,17 @@ async def output_loop(
         # Poll every frame -- an unanswered upload blocks the browser -- but
         # forward at most 20/s. A game can emit effects far faster than a pad
         # can render them, and each forward costs a USB round trip.
-        if rumbles:
-            if not status.game_rumble_seen:
-                status.game_rumble_seen = True
-                print("  game rumble received -- passthrough is working end to end",
-                      flush=True)
+        if rumbles and not status.game_rumble_seen:
+            # Announced once, and NOT inside the rate-limited branch below:
+            # whether Remote Play's web client forwards game rumble to the
+            # Gamepad API at all is the one link in this chain that cannot be
+            # tested without a game running, so it must be observable rather
+            # than a matter of feel.
+            status.game_rumble_seen = True
+            print("  game rumble received -- passthrough is working end to end",
+                  flush=True)
         if rumbles and now - last_rumble >= 0.05:
             last_rumble = now
-            # Say so the first time. Whether Remote Play's web client forwards
-            # game rumble to the Gamepad API at all is the one link in this
-            # chain that cannot be tested without a game running, so make it
-            # observable instead of a matter of feel.
-            if not status.game_rumble_seen:
-                status.game_rumble_seen = True
-                print("  game rumble received -- passthrough is working end to end",
-                      flush=True)
             # Coalesce: several effects can arrive in one drain, but the pad has
             # one pair of motors and only the strongest is audible.
             holder.rumble_raw(max(s for s, _ in rumbles),
@@ -643,7 +648,15 @@ async def output_loop(
         await asyncio.sleep(period)
 
 
-async def status_loop(status: Status, stop: asyncio.Event) -> None:
+async def status_loop(status: Status, stop: asyncio.Event,
+                      show: bool = True) -> None:
+    """Measure the telemetry rate once a second, and optionally print it.
+
+    Measuring is unconditional, printing is not. The rate is the one number
+    that says how soon after you start pedalling the game moves, and the web
+    page reports it too -- so it must not depend on whether --status happens to
+    be on. This task therefore always runs; only the print is gated.
+    """
     # Telemetry rate measured over the last interval. `age` only ever hinted at
     # this, and the difference between the bridge's rate and pure polling is
     # exactly the lag a rider feels.
@@ -652,7 +665,10 @@ async def status_loop(status: Status, stop: asyncio.Event) -> None:
         await asyncio.sleep(1.0)
         now = time.monotonic()
         hz = (status.frames - last_frames) / max(1e-6, now - last_at)
+        status.hz = hz
         last_frames, last_at = status.frames, now
+        if not show:
+            continue
         age = (f"{time.monotonic() - status.bike_seen:4.1f}s"
                if status.bike_seen else "  -- ")
         print(
@@ -692,8 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
                         default="none",
                         help="scale the left stick by effort (default: none)")
     parser.add_argument("--movement-min", type=float, default=0.0,
-                        help="effort at which movement starts; 0 lets the GAME's "
-                             "deadzone (typically 12-24%%) be the threshold")
+                        help="effort at which movement starts. With "
+                             "--movement-floor 0, leaving this at 0 lets the "
+                             "GAME's own deadzone (typically 12-24%%) be the "
+                             "threshold; a non-zero floor starts you above it "
+                             "instead")
     parser.add_argument("--movement-max", type=float, default=100.0,
                         help="effort giving full stick deflection (watts or rpm)")
     parser.add_argument("--movement-floor", type=float, default=0.5,
@@ -714,7 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--frozen-after", type=float, default=4.0,
                         help="seconds of bit-identical telemetry before the "
-                             "console counts as frozen and movement is zeroed. "
+                             "console counts as latched and the buttons it was "
+                             "holding are released. Movement is left alone. "
                              "0 disables. (default 4)")
     parser.add_argument("--no-gate", action="store_true")
     parser.add_argument(
@@ -745,6 +765,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launch-on-input", metavar="CMD", default=None,
                         help="run CMD on the launch trigger, when no browser is "
                              "running (e.g. tools/start-remoteplay.sh)")
+    parser.add_argument("--web-port", type=int, default=0,
+                        help="serve the config page on this port (0 = off). "
+                             "Turns the tuning dials into sliders on your "
+                             "phone, applied live.")
+    parser.add_argument("--web-bind", default="0.0.0.0",
+                        help="address the config page listens on (default "
+                             "0.0.0.0, i.e. reachable from the LAN)")
+    parser.add_argument("--config-file", default=None,
+                        help="config.env to persist dial changes to (default: "
+                             "the one beside this checkout)")
     parser.add_argument("--launch-trigger", choices=["konami", "any"],
                         default="konami",
                         help="konami: up up down down left right left right B A; "
@@ -764,40 +794,21 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
     """Validate arguments and assemble the runtime configuration."""
     if args.simulate_bike and args.address:
         parser.error("--simulate-bike and --address are mutually exclusive")
-    if args.gate_open < args.gate_close:
-        parser.error(f"--gate-open ({args.gate_open}) must be >= --gate-close "
-                     f"({args.gate_close}); inverted thresholds make the gate chatter")
-    if args.axis_max <= args.axis_min:
-        parser.error(f"--axis-max ({args.axis_max}) must exceed "
-                     f"--axis-min ({args.axis_min})")
-    if args.movement_max <= args.movement_min:
-        parser.error(f"--movement-max ({args.movement_max}) must exceed "
-                     f"--movement-min ({args.movement_min})")
-    if not 0.0 <= args.movement_floor < 1.0:
-        parser.error("--movement-floor must be in [0.0, 1.0)")
-    if args.movement_grace < 0:
-        parser.error(
-            f"--movement-grace ({args.movement_grace}) must be 0 (disabled) or "
-            "positive. It holds the last live scale through the console's ~5s "
-            "pause; longer than that keeps holding after real telemetry is back, "
-            "which no longer has anything to do with the blackout.")
-    if args.frozen_after < 0 or 0 < args.frozen_after < 2.5:
-        parser.error(
-            f"--frozen-after ({args.frozen_after}) must be 0 (disabled) or at "
-            "least 2.5. The console legitimately holds its last reading for "
-            "about 2s at the end of every pedalling stretch, so anything "
-            "shorter zeroes movement every time you stop.")
-    if not 5.0 <= args.frame_rate <= 1000.0:
-        parser.error(
-            f"--frame-rate ({args.frame_rate}) must be between 5 and 1000. "
-            "Zero divides by zero; negative spins the loop at 100% CPU (and it "
-            "runs at Nice=-10); below the telemetry rate, ride-log rows are "
-            "silently dropped.")
-    if not 0.0 < args.poll_interval <= 0.5:
-        # The staleness window is derived from this, so an unbounded value buys
-        # seconds of full-deflection movement from a dead bike. The model behind
-        # stale_after_for is only calibrated over 0.02-0.2 anyway.
-        parser.error(f"--poll-interval ({args.poll_interval}) must be in (0, 0.5]")
+
+    # Per-dial ranges come from bike_controller/dials.py rather than being
+    # restated here. The web page validates through the same table, so the two
+    # cannot drift into disagreeing about what a legal movement floor is --
+    # which is exactly what would happen if each kept its own copy of the
+    # bounds. The reasons behind individual numbers live next to them there.
+    for dial in DIALS:
+        if dial.arg is None:
+            continue
+        try:
+            setattr(args, dial.arg,
+                    dials_module.coerce(dial, getattr(args, dial.arg)))
+        except DialError as exc:
+            parser.error(f"--{dial.arg.replace('_', '-')}: {exc}")
+
     if not hasattr(e, args.sprint_button):
         parser.error(f"unknown --sprint-button {args.sprint_button!r}")
 
@@ -830,30 +841,43 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
                      f"choose from {', '.join(GATE_TARGETS)}")
 
     axis_code = AXIS_CHOICES[args.axis]
-    return Settings(
-        config=MappingConfig(
-            gate=GateConfig(
-                enabled=not args.no_gate,
-                open_rpm=args.gate_open,
-                close_rpm=args.gate_close,
-                grace_seconds=args.gate_grace,
-            ),
-            axis=AxisConfig(
-                enabled=axis_code is not None,
-                min_rpm=args.axis_min,
-                max_rpm=args.axis_max,
-            ),
-            movement=movement,
-            buttons=args.button,
-            # Derived, never hand-set: a fixed window silently stops matching
-            # the telemetry rate the moment --poll-interval changes.
-            stale_after=stale_after_for(args.poll_interval),
-            frozen_after=args.frozen_after,
+    config = MappingConfig(
+        gate=GateConfig(
+            enabled=not args.no_gate,
+            open_rpm=args.gate_open,
+            close_rpm=args.gate_close,
+            grace_seconds=args.gate_grace,
         ),
+        axis=AxisConfig(
+            enabled=axis_code is not None,
+            min_rpm=args.axis_min,
+            max_rpm=args.axis_max,
+        ),
+        movement=movement,
+        buttons=args.button,
+        # Derived, never hand-set: a fixed window silently stops matching
+        # the telemetry rate the moment --poll-interval changes.
+        stale_after=stale_after_for(args.poll_interval),
+        frozen_after=args.frozen_after,
+    )
+
+    # Rules spanning two fields, which no per-dial range check can express.
+    # Shared with the web page: an inverted min/max pair is just as broken
+    # arriving from a slider as from argv.
+    problems = dials_module.check_consistency(config)
+    if problems:
+        parser.error("; ".join(problems))
+
+    return Settings(
+        config=config,
         wiring=Wiring(
             axis_code=axis_code,
-            sprint_code=(getattr(e, args.sprint_button)
-                         if args.sprint_at is not None else None),
+            # Resolved unconditionally, NOT only when --sprint-at was given at
+            # startup. Sprint is a live dial now: turning it on from the web
+            # page would otherwise set a flag with no button wired to it, and
+            # the rider would get no sprint and no error. out.sprint is already
+            # False whenever sprint_at is None, so nothing else changes.
+            sprint_code=getattr(e, args.sprint_button),
             gated_axes=frozenset(gated_axes),
             gated_buttons=frozenset(gated_buttons),
             rumble=not args.no_rumble,
@@ -866,10 +890,10 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
 
 def print_banner(args, settings: Settings, launcher: "Launcher",
                  detector, pad: VirtualGamepad, mapper: Mapper,
-                 watchdog: Watchdog) -> None:
+                 watchdog: Watchdog, web: str = "off") -> None:
     """Startup summary.
 
-    deploy.sh greps journalctl for these exact lines as its post-restart smoke
+    tools/selftest.sh greps journalctl for these exact lines in its health
     check, so this is a verification surface, not decoration. Each feature gets
     its own if/else: a previous version chained them and reported "Movement
     scaling: off" based on whether a LAUNCH COMMAND was configured.
@@ -892,9 +916,6 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     movement = config.movement
     if movement.enabled:
         floor = f", floor {movement.floor:.2f}" if movement.floor else ""
-        # The banner is the only place the running config is visible in the
-        # journal, and selftest.sh health greps this line. A hold that cannot be
-        # confirmed from here is a hold nobody can tell is on.
         grace = (f", holding {movement.blackout_grace:.0f}s through the "
                  f"console's pause" if movement.blackout_grace > 0 else "")
         print(f"Movement: left stick scaled by {movement.source} "
@@ -921,6 +942,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
     print(f"Cadence axis: {args.axis}")
     print(f"Haptics: {'on' if wiring.rumble else 'off'}")
     print(f"Frame rate: {wiring.frame_rate:.0f} Hz")
+    print(f"Web config: {web}")
 
     if launcher.enabled:
         trigger = ("Konami code (up up down down left right left right B A)"
@@ -939,6 +961,8 @@ async def main() -> int:
     settings = build_settings(args, parser)
     mapper = Mapper(settings.config)
     status = Status()
+    config_path = args.config_file or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.env")
     watchdog = Watchdog()
     ride_log = RideLogger(args.ride_log) if args.ride_log else None
     holder = ControllerHolder()
@@ -974,8 +998,49 @@ async def main() -> int:
             print(f"  FATAL: {type(exc).__name__}: {exc}", flush=True)
             stop.set()
 
+    web_server = None
+    web_banner = "off"
+    if args.web_port:
+        from bike_controller.webconfig import ConfigServer
+
+        def log_change(changes: dict) -> None:
+            """Say what was tuned, in the journal, at the moment it happened.
+
+            Otherwise a ride's config is unreconstructable afterwards: the
+            values are live, so the only trace they ever existed is this line.
+            """
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(changes.items()))
+            print(f"  web config: {summary}", flush=True)
+
+        # The restart-required dials have no live home to read them from, so
+        # pass what this process is actually running. config.env is only a
+        # fallback: it may not mention FRAME_RATE at all (run-bridge.sh has its
+        # own default), and a --frame-rate on the command line overrides it.
+        web_server = ConfigServer(
+            settings.config, status, config_path, on_change=log_change,
+            restart_values={
+                "POLL_INTERVAL": args.poll_interval,
+                "FRAME_RATE": int(args.frame_rate),
+                "RUMBLE_PASSTHROUGH": bool(args.rumble_passthrough),
+                "RIDE_LOG": bool(args.ride_log),
+            })
+        if await web_server.start(args.web_bind, args.web_port):
+            # Report a URL the rider can actually type. 0.0.0.0 is the bind
+            # address, not an address anything can reach, and this banner is
+            # the only place the URL is ever printed.
+            import socket as _socket
+
+            shown = args.web_bind
+            if shown in ("0.0.0.0", "::", ""):
+                shown = f"{_socket.gethostname().split('.')[0]}.local"
+            web_banner = f"http://{shown}:{args.web_port}"
+        else:
+            web_banner = "failed to bind"
+            web_server = None
+
     with VirtualGamepad(force_feedback=args.rumble_passthrough) as pad:
-        print_banner(args, settings, launcher, detector, pad, mapper, watchdog)
+        print_banner(args, settings, launcher, detector, pad, mapper, watchdog,
+                     web_banner)
 
         tasks = [asyncio.create_task(
             output_loop(pad, mapper, holder, settings.wiring, status, stop,
@@ -990,8 +1055,11 @@ async def main() -> int:
             tasks.append(asyncio.create_task(
                 feed_from_controller(holder, status, args.controller,
                                      not args.no_grab, launcher, detector)))
-        if args.status:
-            tasks.append(asyncio.create_task(status_loop(status, stop)))
+        # Always created: it measures the telemetry rate, which /api/state
+        # reports. --status only decides whether it also prints.
+        tasks.append(asyncio.create_task(status_loop(status, stop, args.status)))
+        if web_server is not None:
+            tasks.append(asyncio.create_task(web_server.serve()))
 
         for task in tasks:
             task.add_done_callback(on_task_done)

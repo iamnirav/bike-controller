@@ -30,10 +30,13 @@ FIELDS = [
     "cadence_rpm",
     "power_w",
     "resistance",
-    # The console's own accumulator. Logged because it may advance BEFORE the
-    # console admits a non-zero cadence -- the bike takes seconds and several
-    # crank revolutions to acknowledge that pedalling resumed, and if this moves
-    # first, it is a faster signal than cadence.
+    # The console's own accumulator. It was logged on the theory that it might
+    # advance BEFORE the console admits a non-zero cadence, and so be a faster
+    # signal that pedalling had resumed. That theory is now tested and WRONG:
+    # when the console pauses it zeroes distance along with everything else, and
+    # nothing it sends tracks the cranks during the window. Still logged, because
+    # it is the only field that reveals the pause happened at all -- it comes
+    # back where it left off, which is how the discarded pedalling was measured.
     "distance_raw",
     "movement_scale",   # what the left stick was actually multiplied by
     "sprint",

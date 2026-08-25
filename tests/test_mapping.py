@@ -25,10 +25,15 @@ from bike_controller.mapping import (      # noqa: E402
     MovementConfig,
 )
 
-# 0.87 Hz was the original poll rate; the deployed rate is now 2.56 Hz. Tests
-# default to the SLOWER one because it is the harder case for the fail-safe, but
-# the deployed rate is exercised explicitly below -- a fail-safe sized in missed
-# frames behaves differently when the frame rate triples.
+# Two telemetry rates, a slow one and a fast one. Tests default to the SLOWER
+# because it is the harder case for the fail-safe, but the fast one is exercised
+# explicitly below -- a fail-safe sized in missed frames behaves differently when
+# the frame rate triples.
+#
+# The exact figures came from the poll-rate table in the README, which is now
+# flagged there as unverified. That does not weaken these tests: what they need
+# is a slow rate and a fast one roughly a factor of three apart, not the true
+# rate of any particular poll interval. Do not read them as measurements.
 TELEMETRY_HZ = 0.87
 DEPLOYED_HZ = 2.56
 FRAME_HZ = 60.0              # what the bridge's output loop runs at
@@ -158,24 +163,31 @@ def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
 
     out, _ = run(mapper, None, seconds=8.0, t0=t, feed=False,
                  telemetry_hz=DEPLOYED_HZ)
-    assert out.gate_open is False, "dead feed left the gate OPEN at 2.56 Hz"
+    assert out.gate_open is False, "dead feed left the gate OPEN at the fast rate"
     assert out.cadence == 0.0
 
 
-def test_the_freeze_guard_works_at_the_deployed_baseline():
-    """The guard was only ever tested at floor 0, which nobody runs."""
+def test_the_freeze_guard_leaves_movement_alone_at_the_deployed_baseline():
+    """A latch must NOT pin a pedalling rider to the floor.
+
+    It used to. But the left stick is only ever the physical stick times this
+    scale, so a lying console cannot move anyone by itself -- while flooring a
+    rider who is working hard, for as long as the console chooses to stay
+    latched, loses fights. The guard gave up the wrong thing.
+    """
     mapper = make_movement_mapper(max_value=75.0, floor=0.5)
     t = 0.0
     for i in range(10):
         t += 0.5
         mapper.submit(51.0, 60.0, now=t, distance=100 + i * 3)
-    assert mapper.evaluate(now=t).movement_scale > 0.8
+    riding = mapper.evaluate(now=t).movement_scale
+    assert riding > 0.8
 
     for _ in range(20):                      # the observed 51rpm/60W latch
         t += 0.5
         mapper.submit(51.0, 60.0, now=t, distance=130)
     assert mapper.is_frozen(now=t)
-    assert mapper.evaluate(now=t).movement_scale == 0.5
+    assert mapper.evaluate(now=t).movement_scale == riding
 
 
 def test_movement_scale_zeroes_on_dead_link_at_deployed_rate():
@@ -499,26 +511,55 @@ def test_movement_can_be_driven_by_cadence():
     assert abs(mapper.evaluate(now=1.0).movement_scale - 0.5) < 0.01
 
 
-def test_frozen_console_is_treated_as_stopped():
-    """Observed on real hardware: the console latched one reading and resent it
-    unchanged for 30 seconds while the rider sat still. Frames kept arriving, so
-    the staleness check -- which only sees silence -- never fired, and pedalling
-    stopped mattering."""
-    mapper = make_movement_mapper()
+def test_a_frozen_console_releases_the_buttons_it_was_holding():
+    """The one thing a latch genuinely breaks.
+
+    Bike-driven buttons are written to the pad whatever the rider's hands are
+    doing, so a console latched above sprint_at holds sprint down for as long as
+    it lies -- controller untouched, nothing the rider can do about it. Movement
+    is stick-gated and needs no such rescue; the buttons are not.
+    """
+    mapper = Mapper(MappingConfig(
+        movement=MovementConfig(enabled=True, source="power", min_value=0.0,
+                                max_value=130.0, floor=0.0, sprint_at=50.0),
+        buttons=[ButtonRule(name="BTN_TR", min_rpm=40.0)],
+    ))
     t = 0.0
     for i in range(20):                      # genuine riding: distance climbs
         t += 0.5
         mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
-    assert mapper.evaluate(now=t).movement_scale > 0.5
+        # Every frame, as the output loop does: value() advances the cadence
+        # filter, so evaluating only at the end leaves it one step off zero and
+        # the threshold rule never opens.
+        out = mapper.evaluate(now=t)
+    assert out.sprint and "BTN_TR" in out.buttons
     assert not mapper.is_frozen(now=t)
 
     frozen_at = t
     for _ in range(20):                      # console repeats itself verbatim
         t += 0.5
         mapper.submit(60.0, 70.0, now=t, distance=157)
+        out = mapper.evaluate(now=t)
     assert t - frozen_at > mapper.config.frozen_after
     assert mapper.is_frozen(now=t)
-    assert mapper.evaluate(now=t).movement_scale == mapper.config.movement.floor
+    assert not out.sprint, "sprint stayed held on a lying console"
+    assert "BTN_TR" not in out.buttons, "threshold button stayed held"
+
+
+def test_a_frozen_console_does_not_buzz_the_controller():
+    """Silence buzzes; a latch is logged and left alone. One is the bike going
+    away mid-ride, the other is a fault whose announcement mid-firefight is a
+    worse interruption than the fault itself."""
+    mapper = make_movement_mapper()
+    t = 0.0
+    for i in range(10):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+    for _ in range(20):
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=127)
+    assert mapper.is_frozen(now=t)
+    assert not mapper.evaluate(now=t).degraded
 
 
 def test_a_brief_repeat_is_not_a_freeze():
@@ -546,6 +587,27 @@ def test_freeze_detection_needs_distance():
         mapper.submit(60.0, 70.0, now=t)     # no distance supplied
     assert not mapper.is_frozen(now=t)
     assert mapper.evaluate(now=t).movement_scale > 0.5
+
+
+def test_a_perfectly_steady_rider_is_not_frozen():
+    """Distance is what separates a steady rider from a stuck console.
+
+    The twin of test_freeze_detection_needs_distance, which only covers distance
+    being ABSENT. This is the case the discriminator exists for: cadence and
+    power bit-identical sample after sample -- which at fixed resistance is one
+    signal, not two, since the console derives watts from rpm -- while the
+    accumulator keeps climbing. Drop distance from the change-detection tuple
+    and this rider gets their sprint taken away for pedalling too evenly.
+    """
+    mapper = make_movement_mapper(sprint_at=50.0)
+    t = 0.0
+    for i in range(40):                      # 20s of metronomic pedalling
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+        out = mapper.evaluate(now=t)
+    assert t > mapper.config.frozen_after * 4
+    assert not mapper.is_frozen(now=t), "a steady rider was called a stuck console"
+    assert out.sprint, "sprint was released from a live, pedalling rider"
 
 
 def test_freeze_guard_can_be_switched_off():
@@ -599,13 +661,13 @@ def test_movement_returns_when_the_console_unfreezes():
     for _ in range(20):
         t += 0.5
         mapper.submit(60.0, 70.0, now=t, distance=127)
-    assert mapper.evaluate(now=t).movement_scale == mapper.config.movement.floor
+    assert mapper.is_frozen(now=t)
 
     for i in range(4):                       # console starts reporting again
         t += 0.5
         mapper.submit(60.0, 70.0, now=t, distance=130 + i * 3)
-    assert not mapper.is_frozen(now=t)
-    assert mapper.evaluate(now=t).movement_scale > 0.5, "never recovered"
+    assert not mapper.is_frozen(now=t), "never recovered"
+    assert mapper.evaluate(now=t).movement_scale > 0.5
 
 
 def test_gate_disabled_always_passes():
@@ -708,17 +770,20 @@ def test_a_dead_feed_never_collects_grace():
     assert out.degraded
 
 
-def test_a_frozen_console_never_collects_grace():
-    """A console repeating one non-zero reading is a FAULT, and frozen folds
-    into stale. Holding its last scale would reward exactly the failure the
-    freeze guard exists to catch."""
+def test_a_frozen_console_is_not_a_blackout():
+    """A latch reports non-zero readings, so it never looks blacked out and the
+    grace clock never starts. Worth pinning: the two now share a code path, and
+    a latched reading of exactly (0, 0) would be a blackout by any test -- which
+    is why is_frozen requires a non-zero cadence in the first place."""
     m = _grace_mapper(floor=0.5)
     for i in range(12):
         # Bit-identical readings, arriving steadily, for well over frozen_after.
         m.submit(cadence_rpm=51, power_w=60, now=float(i), distance=348)
     out = m.evaluate(now=11.0)
     assert m.is_frozen(now=11.0)
-    assert out.movement_scale == 0.5
+    # Movement is left alone, and no hold was armed -- there was no blackout.
+    assert out.movement_scale > 0.5
+    assert m._blackout_since is None
 
 
 def test_grace_of_zero_restores_the_plain_floor():

@@ -13,10 +13,10 @@ Mapping modes, independently toggleable:
   axis      cadence drives an analog axis (throttle, stick, whatever)
   buttons   cadence thresholds fire discrete button presses
 
-The console reports at ~2.56 Hz at the deployed poll interval (0.87 Hz at the
-old 0.2s one), so raw cadence is still too steppy to drive an axis directly. CadenceTracker smooths it and, critically, decays toward zero
-when samples stop arriving -- otherwise a dropped BLE link would leave the gate
-stuck open with the game happily accepting input from a stationary bike.
+The console reports at only a couple of Hz, so raw cadence is far too steppy to
+drive an axis directly. CadenceTracker smooths it and, critically, decays toward
+zero when samples stop arriving -- otherwise a dropped BLE link would leave the
+gate stuck open with the game happily accepting input from a stationary bike.
 """
 
 from __future__ import annotations
@@ -128,10 +128,14 @@ class MovementConfig:
     Deliberately NOT smoothed. The raw value is passed straight through so the
     real feel can be judged before deciding whether a filter is wanted at all.
 
-    With `min_value = 0` the game's own deadzone becomes the lower threshold --
-    you must work hard enough to clear it before you move. That is typically
-    12.5% (Unity default) to 24% (XInput recommended) of full deflection, so it
-    is a real threshold, and it self-calibrates to whatever game you are in.
+    With `min_value = 0` AND `floor = 0`, the game's own deadzone becomes the
+    lower threshold -- you must work hard enough to clear it before you move.
+    That is typically 12.5% (Unity default) to 24% (XInput recommended) of full
+    deflection, and it self-calibrates to whatever game you are in.
+
+    A non-zero `floor` deliberately defeats that: it starts you above the
+    deadzone at zero effort, which is the whole point of a baseline. The two
+    settings are alternatives, not companions.
     """
 
     enabled: bool = False
@@ -143,8 +147,9 @@ class MovementConfig:
     # buys the rest, so 0 W maps to 0.5 and max_value maps to 1.0.
     #
     # This is what makes bike-side faults degrade instead of strand you: the
-    # console's restart delay, a freeze, or a dropped link all leave you moving
-    # slowly rather than stuck. 0.0 restores strict pedal-or-nothing.
+    # console's restart delay or a dropped link leave you moving slowly rather
+    # than stuck. 0.0 restores strict pedal-or-nothing. (A frozen console is
+    # NOT in that list -- see evaluate(); it leaves movement alone.)
     #
     # Why 0.5 and not something smaller: the number has to clear the DOWNSTREAM
     # deadzone, and the game's is the one that counts. Games apply a radial
@@ -225,10 +230,12 @@ class MappingConfig:
     stale_after: float | None = None
     # Seconds of bit-identical telemetry before the console is treated as
     # frozen. Observed on real hardware: it latched cadence 51 / power 60 /
-    # distance 348 and resent it unchanged for 30 seconds while the rider sat
-    # still, and the character kept walking the whole time. Frames kept
+    # distance 348 and resent it unchanged for 30 seconds. Frames kept
     # arriving, so the staleness check -- which only sees SILENCE -- never
     # fired.
+    #
+    # What tripping this does is narrow on purpose: it releases the bike-driven
+    # buttons and logs, and leaves movement alone. See evaluate() for why.
     #
     # A short freeze is normal: the console holds its last reading for ~2s at
     # the end of every pedalling stretch before zeroing. 4s clears that with
@@ -247,8 +254,9 @@ class MappingOutput:
     movement_scale: float = 1.0
     sprint: bool = False
     at_max: bool = False
-    # Telemetry is stale or the console is frozen. With a baseline set, a fault
-    # no longer stops the rider, so this is the only way they can learn of it.
+    # Telemetry has gone SILENT. Deliberately not set for a frozen console,
+    # which is logged instead -- see evaluate(). With a baseline set, silence no
+    # longer stops the rider, so this is the only way they can learn of it.
     degraded: bool = False
     power: float = 0.0
 
@@ -329,8 +337,11 @@ class Mapper:
         movement = self.config.movement
         if not movement.enabled:
             return 1.0, False, False
-        # A dead feed must not leave the stick deflected -- that would walk the
-        # character into a wall forever. This is the fail-safe, not smoothing.
+        # A dead feed must not keep granting the movement the rider earned
+        # while the bike was still talking. This is the fail-safe, not
+        # smoothing. Note it is not protecting against a runaway rig: the scale
+        # multiplies the physical stick, so an untouched controller is already
+        # zero whatever this returns. See the baseline note below.
         if stale:
             self._sprinting = False
             self._at_max = False
@@ -436,13 +447,30 @@ class Mapper:
             self._frozen_reported = True
             print(f"  console telemetry frozen at cadence={self._cadence_raw:.0f} "
                   f"power={self._power_raw:.0f} for >"
-                  f"{self.config.frozen_after:.1f}s -- treating as stopped",
+                  f"{self.config.frozen_after:.1f}s -- releasing held buttons",
                   flush=True)
-        # Frozen counts as stale: frames are arriving, but they carry nothing.
-        stale = self.tracker.is_stale(now) or frozen
+        # Frozen is deliberately NOT folded into stale, and deliberately does
+        # not touch movement.
+        #
+        # It used to do both: a latch dropped the scale to the floor. But the
+        # left stick is only ever the PHYSICAL stick times this scale, so a
+        # lying console cannot move anyone on its own -- and pinning a rider who
+        # is pedalling hard to the floor, for as long as the console chooses to
+        # stay latched, is a worse outcome in a game than briefly over-reading
+        # their effort. Nothing here is safety-critical enough to buy with that.
+        #
+        # What a latch genuinely breaks is the bike-driven BUTTONS below, which
+        # are written to the pad whatever the rider's hands are doing. A console
+        # latched above sprint_at holds sprint down for as long as it lies, with
+        # the controller untouched. That is the part worth fixing, and the only
+        # part.
+        stale = self.tracker.is_stale(now)
         out.gate_open = self._update_gate(cadence, now, stale)
         out.power = self._power_raw
         out.movement_scale, out.sprint, out.at_max = self._movement(stale, now)
+        # Silence still counts as degraded, which buzzes the controller. A latch
+        # does not: it is logged and left alone, because a buzz mid-firefight is
+        # a worse interruption than the fault it announces.
         out.degraded = stale
 
         axis = self.config.axis
@@ -451,8 +479,17 @@ class Mapper:
             fraction = (cadence - axis.min_rpm) / span
             out.axis = min(1.0, max(0.0, fraction))
 
-        for rule in self.config.buttons:
-            if cadence >= rule.min_rpm:
-                out.buttons.add(rule.name)
+        if frozen:
+            # Every bike-driven button, not just sprint: a threshold rule is the
+            # same failure wearing a different name, held down for as long as
+            # the console repeats the reading that opened it.
+            self._sprinting = False
+            self._at_max = False
+            out.sprint = False
+            out.at_max = False
+        else:
+            for rule in self.config.buttons:
+                if cadence >= rule.min_rpm:
+                    out.buttons.add(rule.name)
 
         return out

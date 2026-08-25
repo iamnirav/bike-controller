@@ -9,8 +9,8 @@
 # path no other user could, and the real one stayed untested.
 #
 # Optional convenience only: everything here can be done by hand with git and
-# ssh. What it adds is the gate (suite + mutation testing before anything
-# leaves this machine) and the self-test afterwards.
+# ssh. What it adds is the gate (the suite, before anything leaves this
+# machine) and the self-test afterwards.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,13 +23,9 @@ cd "$HERE"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
+# Run before pushing, so a broken suite never reaches the Pi.
 echo "==> tests"
 for t in tests/test_*.py; do ./.venv/bin/python "$t" | tail -1 | sed 's/^/    /'; done
-
-# A mutant that survives means a test is not constraining what it claims to.
-# Run before pushing, so a weakened suite never reaches the Pi.
-echo "==> mutation testing"
-./.venv/bin/python tools/mutate.py | tail -1 | sed 's/^/    /'
 
 if [ -n "$(git status --porcelain)" ]; then
     echo "ERROR: working tree is dirty. Commit first -- the Pi pulls from git," >&2

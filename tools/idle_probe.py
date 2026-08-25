@@ -272,7 +272,7 @@ async def run(args: argparse.Namespace, trials: list[Trial]) -> int:
         async for sample in bike.stream():
             now = time.monotonic()
 
-            # Read the state flag off the most recent `01 12 14` frame.
+            # Read the state flag off the most recent `01 12` frame.
             for t, data in reversed(frames[-12:]):
                 if len(data) == 20 and data[:2] == STATE_PREFIX:
                     state_flag = data[STATE_OFFSET]
