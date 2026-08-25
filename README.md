@@ -193,8 +193,9 @@ cadence and byte 12 being power.
 
 ### Update rate
 
-**~2.56 Hz at the deployed `--poll-interval 0.05`** — see the measured table
-below. It was 0.87 Hz at the original 0.2 s interval, where the sleep was ~87%
+**A couple of Hz** — see the measured table below, and the caveat under it:
+the fast-interval figures do not survive re-measurement, and the deployed
+interval is 0.02 rather than 0.05. It was 0.87 Hz at the original 0.2 s interval, where the sleep was ~87%
 of cycle time rather than the BLE round trip
 (~30 ms), so `--interval 0.05` should get roughly 2.5 Hz. Verify with the Hz
 readout in `tools/live.py` before assuming.
@@ -357,6 +358,22 @@ Telemetry rate is set by `--poll-interval`. Measured on this console:
 It plateaus near 2.7 Hz — the console's own update ceiling, not our polling — so
 **0.05 is the knee**. Below it you quadruple BLE traffic for about 7%.
 
+> **This table is unverified and two of its rows are probably wrong.** Later
+> measurements disagree at the fast end: **1.27 Hz at 0.05** (counting `0x31`
+> frames in a `tools/idle_probe.py` capture) and **~2.0 Hz at 0.02** (the
+> bridge's own readout on the Pi, over 60 samples). Only the 0.2 row survives
+> re-measurement — 0.88 Hz observed against 0.77 claimed.
+>
+> The gap at the fast end is close to a clean factor of two, and `0x31`
+> telemetry frames alternate one-for-one with `0x17` filler, so the likeliest
+> explanation is that this table counted both. That is a guess, not a finding.
+>
+> Also note **the deployed interval is 0.02, not 0.05** — `config.env` on the Pi
+> says so, and this table has said "(deployed)" against the wrong row for a
+> while. Settling it means a deliberate run at each interval, one method, one
+> session. Until someone does that, treat the shape (it plateaus) as sound and
+> the absolute numbers as suspect.
+
 Worth knowing: cadence is inherently measured over crank revolutions, so at
 60 rpm the console cannot produce a genuinely new value more than about once a
 second. Faster polling does not invent data; it just means you learn about each
@@ -415,7 +432,7 @@ enough not to matter.
 
 Movement scale is the **raw** value, passed straight through with no filter.
 This is a decision, not an oversight: it is not yet known whether smoothing is
-needed, and at ~2.56 Hz telemetry any filter also adds lag, which on movement
+needed, and at a couple of Hz telemetry any filter also adds lag, which on movement
 speed feels like input delay. Judge the real feel first.
 
 One exception, which is safety rather than smoothing: **a stale feed forces the
@@ -505,7 +522,7 @@ at the boundary; the grace period stops one slow pedal stroke killing your input
 mid-fight.
 
 **Smoothing** lives in `bike_controller/mapping.py` (`smoothing_per_second`,
-default 3.0). Higher is snappier and jitterier. Even at 2.56 Hz, raw cadence is
+default 3.0). Higher is snappier and jitterier. Even at a couple of Hz, raw cadence is
 too steppy to drive an axis directly. Note this applies to the *cadence* axis
 and the gate only — movement scale is deliberately unsmoothed, see above.
 
