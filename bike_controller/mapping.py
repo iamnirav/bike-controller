@@ -13,10 +13,10 @@ Mapping modes, independently toggleable:
   axis      cadence drives an analog axis (throttle, stick, whatever)
   buttons   cadence thresholds fire discrete button presses
 
-The console reports at ~2.56 Hz at the deployed poll interval (0.87 Hz at the
-old 0.2s one), so raw cadence is still too steppy to drive an axis directly. CadenceTracker smooths it and, critically, decays toward zero
-when samples stop arriving -- otherwise a dropped BLE link would leave the gate
-stuck open with the game happily accepting input from a stationary bike.
+The console reports at only a couple of Hz, so raw cadence is far too steppy to
+drive an axis directly. CadenceTracker smooths it and, critically, decays toward
+zero when samples stop arriving -- otherwise a dropped BLE link would leave the
+gate stuck open with the game happily accepting input from a stationary bike.
 """
 
 from __future__ import annotations
@@ -128,10 +128,14 @@ class MovementConfig:
     Deliberately NOT smoothed. The raw value is passed straight through so the
     real feel can be judged before deciding whether a filter is wanted at all.
 
-    With `min_value = 0` the game's own deadzone becomes the lower threshold --
-    you must work hard enough to clear it before you move. That is typically
-    12.5% (Unity default) to 24% (XInput recommended) of full deflection, so it
-    is a real threshold, and it self-calibrates to whatever game you are in.
+    With `min_value = 0` AND `floor = 0`, the game's own deadzone becomes the
+    lower threshold -- you must work hard enough to clear it before you move.
+    That is typically 12.5% (Unity default) to 24% (XInput recommended) of full
+    deflection, and it self-calibrates to whatever game you are in.
+
+    A non-zero `floor` deliberately defeats that: it starts you above the
+    deadzone at zero effort, which is the whole point of a baseline. The two
+    settings are alternatives, not companions.
     """
 
     enabled: bool = False
@@ -143,8 +147,9 @@ class MovementConfig:
     # buys the rest, so 0 W maps to 0.5 and max_value maps to 1.0.
     #
     # This is what makes bike-side faults degrade instead of strand you: the
-    # console's restart delay, a freeze, or a dropped link all leave you moving
-    # slowly rather than stuck. 0.0 restores strict pedal-or-nothing.
+    # console's restart delay or a dropped link leave you moving slowly rather
+    # than stuck. 0.0 restores strict pedal-or-nothing. (A frozen console is
+    # NOT in that list -- see evaluate(); it leaves movement alone.)
     #
     # Why 0.5 and not something smaller: the number has to clear the DOWNSTREAM
     # deadzone, and the game's is the one that counts. Games apply a radial
@@ -249,8 +254,9 @@ class MappingOutput:
     movement_scale: float = 1.0
     sprint: bool = False
     at_max: bool = False
-    # Telemetry is stale or the console is frozen. With a baseline set, a fault
-    # no longer stops the rider, so this is the only way they can learn of it.
+    # Telemetry has gone SILENT. Deliberately not set for a frozen console,
+    # which is logged instead -- see evaluate(). With a baseline set, silence no
+    # longer stops the rider, so this is the only way they can learn of it.
     degraded: bool = False
     power: float = 0.0
 
@@ -331,8 +337,11 @@ class Mapper:
         movement = self.config.movement
         if not movement.enabled:
             return 1.0, False, False
-        # A dead feed must not leave the stick deflected -- that would walk the
-        # character into a wall forever. This is the fail-safe, not smoothing.
+        # A dead feed must not keep granting the movement the rider earned
+        # while the bike was still talking. This is the fail-safe, not
+        # smoothing. Note it is not protecting against a runaway rig: the scale
+        # multiplies the physical stick, so an untouched controller is already
+        # zero whatever this returns. See the baseline note below.
         if stale:
             self._sprinting = False
             self._at_max = False

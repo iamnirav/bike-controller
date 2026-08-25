@@ -101,7 +101,7 @@ class IconBike:
         self.poll_interval = poll_interval
         # Called with (monotonic_time, bytes) for EVERY notification, before any
         # filtering. _on_notify keeps only 0x31 frames, which is right for the
-        # bridge and wrong for protocol work: the console also sends a `01 12 14`
+        # bridge and wrong for protocol work: the console also sends an `01 12`
         # frame whose byte 11 is a live/paused state flag. Tools that need the
         # whole conversation pass a hook rather than reimplementing the poll loop.
         self.on_raw = on_raw

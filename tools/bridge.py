@@ -728,7 +728,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--frozen-after", type=float, default=4.0,
                         help="seconds of bit-identical telemetry before the "
-                             "console counts as frozen and movement is zeroed. "
+                             "console counts as latched and the buttons it was "
+                             "holding are released. Movement is left alone. "
                              "0 disables. (default 4)")
     parser.add_argument("--no-gate", action="store_true")
     parser.add_argument(
