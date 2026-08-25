@@ -834,9 +834,9 @@ tools/deploy.sh               # gate, push, and update the Pi to this branch
 ```
 
 `tools/deploy.sh` is a convenience, not a requirement — it is `git push` plus
-`git pull && ./install.sh` over SSH. What it adds is a gate: the suite and
-mutation testing run **before** anything leaves your machine, and `install.sh`
-runs the self-test on arrival. It refuses to run with a dirty tree, because the
+`git pull && ./install.sh` over SSH. What it adds is a gate: the suite runs
+**before** anything leaves your machine, and `install.sh` runs the self-test on
+arrival. It refuses to run with a dirty tree, because the
 Pi pulls from git and uncommitted work would silently not be deployed.
 
 It reads `PI_HOST` from `config.env`. Use the Pi's **mDNS** name rather than an

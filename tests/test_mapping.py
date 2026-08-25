@@ -584,6 +584,27 @@ def test_freeze_detection_needs_distance():
     assert mapper.evaluate(now=t).movement_scale > 0.5
 
 
+def test_a_perfectly_steady_rider_is_not_frozen():
+    """Distance is what separates a steady rider from a stuck console.
+
+    The twin of test_freeze_detection_needs_distance, which only covers distance
+    being ABSENT. This is the case the discriminator exists for: cadence and
+    power bit-identical sample after sample -- which at fixed resistance is one
+    signal, not two, since the console derives watts from rpm -- while the
+    accumulator keeps climbing. Drop distance from the change-detection tuple
+    and this rider gets their sprint taken away for pedalling too evenly.
+    """
+    mapper = make_movement_mapper(sprint_at=50.0)
+    t = 0.0
+    for i in range(40):                      # 20s of metronomic pedalling
+        t += 0.5
+        mapper.submit(60.0, 70.0, now=t, distance=100 + i * 3)
+        out = mapper.evaluate(now=t)
+    assert t > mapper.config.frozen_after * 4
+    assert not mapper.is_frozen(now=t), "a steady rider was called a stuck console"
+    assert out.sprint, "sprint was released from a live, pedalling rider"
+
+
 def test_freeze_guard_can_be_switched_off():
     """FROZEN_AFTER=0 is documented as the kill switch, in config and the
     banner. Nothing tested it, so the comparison could silently invert."""
