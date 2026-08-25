@@ -25,10 +25,15 @@ from bike_controller.mapping import (      # noqa: E402
     MovementConfig,
 )
 
-# 0.87 Hz was the original poll rate; the deployed rate is now 2.56 Hz. Tests
-# default to the SLOWER one because it is the harder case for the fail-safe, but
-# the deployed rate is exercised explicitly below -- a fail-safe sized in missed
-# frames behaves differently when the frame rate triples.
+# Two telemetry rates, a slow one and a fast one. Tests default to the SLOWER
+# because it is the harder case for the fail-safe, but the fast one is exercised
+# explicitly below -- a fail-safe sized in missed frames behaves differently when
+# the frame rate triples.
+#
+# The exact figures came from the poll-rate table in the README, which is now
+# flagged there as unverified. That does not weaken these tests: what they need
+# is a slow rate and a fast one roughly a factor of three apart, not the true
+# rate of any particular poll interval. Do not read them as measurements.
 TELEMETRY_HZ = 0.87
 DEPLOYED_HZ = 2.56
 FRAME_HZ = 60.0              # what the bridge's output loop runs at
@@ -158,7 +163,7 @@ def test_dead_link_closes_the_gate_at_the_deployed_telemetry_rate():
 
     out, _ = run(mapper, None, seconds=8.0, t0=t, feed=False,
                  telemetry_hz=DEPLOYED_HZ)
-    assert out.gate_open is False, "dead feed left the gate OPEN at 2.56 Hz"
+    assert out.gate_open is False, "dead feed left the gate OPEN at the fast rate"
     assert out.cadence == 0.0
 
 

@@ -71,7 +71,13 @@ POLL_SEQUENCE = [
 
 @dataclass
 class BikeState:
-    """One telemetry sample. `age` lets callers distrust stale data."""
+    """One telemetry sample.
+
+    `age` and `updated_at` have no callers. Staleness is decided in mapping.py
+    by CadenceTracker, which keeps its own clock because it has to decay the
+    smoothed value as well as flag it -- so nothing here is what protects the
+    rider, whatever this once implied.
+    """
 
     cadence_rpm: int = 0
     power_w: int = 0
@@ -224,7 +230,11 @@ class IconBike:
                 await self._client.__aexit__(*exc)
 
     async def stream(self):
-        """Yield each telemetry sample as it arrives (~1 Hz).
+        """Yield each telemetry sample as it arrives.
+
+        Rate follows poll_interval -- roughly one sample per poll cycle, and the
+        cycle is five packets. See the poll-rate caveat in the README before
+        trusting any specific figure for it.
 
         Raises ConnectionError when the link dies, so callers can reconnect.
         """

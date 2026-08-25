@@ -12,9 +12,11 @@ Semantics: the gate suppresses a chosen SUBSET of the real controller's inputs
 (default: the left stick, i.e. movement). Everything else passes through
 unconditionally, so menus and buttons still work while you are stopped.
 
-Bike-driven output (cadence axis, threshold buttons) is the bike's own
-contribution and always passes -- it is already zero when you are not
-pedalling, so gating it too would be redundant.
+Bike-driven output (sprint, cadence axis, threshold buttons) is the bike's own
+contribution and always passes, whatever the rider's hands are doing. Gating it
+would be redundant while the console is honest, because it is already zero when
+you are not pedalling. It is NOT self-limiting when the console latches, which
+is what the freeze guard in mapping.py exists to catch.
 """
 
 from __future__ import annotations
@@ -204,9 +206,11 @@ KONAMI = [
 
 
 class Launcher:
-    """Runs a command when the rider first touches the controller.
+    """Runs a command on the launch trigger.
 
-    Triggered by button presses only, never axis movement -- stick drift on a
+    What counts as the trigger is decided upstream in feed_from_controller: the
+    Konami code by default, or any button press with --launch-trigger any.
+    Either way it is button presses, never axis movement -- stick drift on a
     resting controller would otherwise fire it unprompted.
 
     Self-re-arming: it declines to launch while the browser is already up, so
@@ -397,7 +401,7 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                     # window: the mapper fails safe in ~1.6s, which is what
                     # protects the rider. This only decides when to spend a
                     # reconnect, which costs a BLE round trip, so it can afford
-                    # to be patient. ~26 missed frames at the deployed rate.
+                    # to be patient -- tens of missed frames, not one.
                     sample = await asyncio.wait_for(stream.__anext__(), timeout=10.0)
                     status.cadence_raw = sample.cadence_rpm
                     status.resistance = sample.resistance
@@ -445,9 +449,11 @@ async def feed_simulated(mapper: Mapper, status: Status) -> None:
         # Handed over the same way the real feed does, so --ride-log is
         # exercised by the smoke run rather than only ever on a real ride.
         status.pending_sample = _SimSample(round(cadence), round(power))
-        # Mirror the deployed telemetry rate (~2.56 Hz), not the original
-        # ~0.87 Hz -- otherwise the simulator runs closer to the staleness
-        # window than the real thing ever does.
+        # Roughly the real telemetry period, and deliberately not SLOWER than
+        # it: a simulator that ran closer to the staleness window than the
+        # console does would make the fail-safe look tighter than it is. (See
+        # the poll-rate caveat in the README -- the exact rate is unverified,
+        # but erring fast is the safe side of it.)
         await asyncio.sleep(0.4)
 
 
@@ -609,21 +615,17 @@ async def output_loop(
         # Poll every frame -- an unanswered upload blocks the browser -- but
         # forward at most 20/s. A game can emit effects far faster than a pad
         # can render them, and each forward costs a USB round trip.
-        if rumbles:
-            if not status.game_rumble_seen:
-                status.game_rumble_seen = True
-                print("  game rumble received -- passthrough is working end to end",
-                      flush=True)
+        if rumbles and not status.game_rumble_seen:
+            # Announced once, and NOT inside the rate-limited branch below:
+            # whether Remote Play's web client forwards game rumble to the
+            # Gamepad API at all is the one link in this chain that cannot be
+            # tested without a game running, so it must be observable rather
+            # than a matter of feel.
+            status.game_rumble_seen = True
+            print("  game rumble received -- passthrough is working end to end",
+                  flush=True)
         if rumbles and now - last_rumble >= 0.05:
             last_rumble = now
-            # Say so the first time. Whether Remote Play's web client forwards
-            # game rumble to the Gamepad API at all is the one link in this
-            # chain that cannot be tested without a game running, so make it
-            # observable instead of a matter of feel.
-            if not status.game_rumble_seen:
-                status.game_rumble_seen = True
-                print("  game rumble received -- passthrough is working end to end",
-                      flush=True)
             # Coalesce: several effects can arrive in one drain, but the pad has
             # one pair of motors and only the strongest is audible.
             holder.rumble_raw(max(s for s, _ in rumbles),
@@ -706,8 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
                         default="none",
                         help="scale the left stick by effort (default: none)")
     parser.add_argument("--movement-min", type=float, default=0.0,
-                        help="effort at which movement starts; 0 lets the GAME's "
-                             "deadzone (typically 12-24%%) be the threshold")
+                        help="effort at which movement starts. With "
+                             "--movement-floor 0, leaving this at 0 lets the "
+                             "GAME's own deadzone (typically 12-24%%) be the "
+                             "threshold; a non-zero floor starts you above it "
+                             "instead")
     parser.add_argument("--movement-max", type=float, default=100.0,
                         help="effort giving full stick deflection (watts or rpm)")
     parser.add_argument("--movement-floor", type=float, default=0.5,
@@ -888,7 +893,7 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
                  watchdog: Watchdog, web: str = "off") -> None:
     """Startup summary.
 
-    deploy.sh greps journalctl for these exact lines as its post-restart smoke
+    tools/selftest.sh greps journalctl for these exact lines in its health
     check, so this is a verification surface, not decoration. Each feature gets
     its own if/else: a previous version chained them and reported "Movement
     scaling: off" based on whether a LAUNCH COMMAND was configured.
