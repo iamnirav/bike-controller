@@ -81,6 +81,7 @@ MAX_CONNECTIONS = 24
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 PAGE_PATH = os.path.join(os.path.dirname(_HERE), "web", "index.html")
+LIVE_PAGE_PATH = os.path.join(os.path.dirname(_HERE), "web", "live.html")
 
 
 def _local_host_names() -> set[str]:
@@ -389,7 +390,15 @@ class ConfigServer:
         if request.path in ("/", "/index.html"):
             if request.method != "GET":
                 return 405, b"GET only", "text/plain"
-            return self._page()
+            return self._page(PAGE_PATH)
+        if request.path in ("/live", "/live.html"):
+            if request.method != "GET":
+                return 405, b"GET only", "text/plain"
+            return self._page(LIVE_PAGE_PATH)
+        if request.path == "/api/live":
+            if request.method != "GET":
+                return 405, self._json({"error": "GET only"}), "application/json"
+            return 200, self._json(self.live()), "application/json"
         if request.path == "/api/state":
             if request.method != "GET":
                 return 405, self._json({"error": "GET only"}), "application/json"
@@ -404,14 +413,14 @@ class ConfigServer:
             return self._post_restart()
         return 404, b"not found", "text/plain"
 
-    def _page(self) -> tuple[int, bytes, str]:
-        # Exactly one file is ever served and its path is a constant, so there
-        # is no request-controlled path to traverse.
+    def _page(self, path: str) -> tuple[int, bytes, str]:
+        # Only ever called with one of the module's constant paths, so there is
+        # no request-controlled path to traverse.
         try:
-            with open(PAGE_PATH, "rb") as handle:
+            with open(path, "rb") as handle:
                 return 200, handle.read(), "text/html; charset=utf-8"
         except OSError as exc:
-            return 500, f"cannot read {PAGE_PATH}: {exc}".encode(), "text/plain"
+            return 500, f"cannot read {path}: {exc}".encode(), "text/plain"
 
     @staticmethod
     def _json(payload) -> bytes:
@@ -606,6 +615,35 @@ class ConfigServer:
             })
         return {"dials": entries, "status": self._status()}
 
+    def live(self) -> dict:
+        """What the live gauge page polls: status plus the thresholds to draw.
+
+        Separate from state() because the gauge polls several times a second
+        and state() parses config.env on every call. Everything here is read
+        from memory -- the running MappingConfig, not the file -- so the marks
+        on the gauge are the thresholds actually in force, and they move the
+        moment a dial does.
+        """
+        movement = self.config.movement
+        sprint_at = movement.sprint_at
+        return {
+            "status": self._status(),
+            "thresholds": {
+                # "none" when movement scaling is off: the page then has no
+                # effort zones to draw and shows cadence alone.
+                "source": movement.source if movement.enabled else "none",
+                "unit": "W" if movement.source == "power" else "rpm",
+                "movement_min": movement.min_value,
+                "movement_max": movement.max_value,
+                "floor": movement.floor,
+                "sprint_at": sprint_at,
+                "sprint_release": (None if sprint_at is None
+                                   else sprint_at * movement.sprint_release_ratio),
+                "forced_movement": self.config.forced_movement.enabled,
+                "stale_after": self.config.stale_after,
+            },
+        }
+
     def _status(self) -> dict:
         status = self.status
         seen = getattr(status, "bike_seen", None)
@@ -621,6 +659,7 @@ class ConfigServer:
             "move": round(getattr(status, "move", 1.0), 3),
             "sprint": getattr(status, "sprint", False),
             "frozen": getattr(status, "frozen", False),
+            "forced": getattr(status, "forced", False),
             "hz": round(getattr(status, "hz", 0.0), 2),
             "frames": getattr(status, "frames", 0),
             "uptime": round(time.monotonic() - self.started_at),

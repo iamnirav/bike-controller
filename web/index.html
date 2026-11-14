@@ -33,6 +33,8 @@
   }
   h1 { font-size: 1.05rem; margin: 4px 0 12px; letter-spacing: .3px; }
   h1 span { color: var(--dim); font-weight: 400; }
+  h1 .golive { float: right; font-size: .85rem; font-weight: 400;
+    color: var(--accent); text-decoration: none; }
 
   /* --- live readout --- */
   .readout {
@@ -126,7 +128,7 @@
 </head>
 <body>
 
-<h1>Bike dials <span id="uptime"></span></h1>
+<h1>Bike dials <span id="uptime"></span><a class="golive" href="/live">Live gauge →</a></h1>
 
 <div class="readout">
   <div class="cell"><b id="r-power">–</b><small>watts</small></div>

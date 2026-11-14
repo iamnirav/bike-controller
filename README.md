@@ -579,6 +579,25 @@ next output frame** — you drag the movement floor while pedalling, in the game
 and feel the change immediately. Values are also written back to `config.env`,
 so what you tuned on the bike is what starts next boot.
 
+**`/live`** is a speedometer for the ride itself, e.g. `http://pi-2.local:8080/live`.
+The dial reads your effort in the units movement scales by (watts in production),
+with the thresholds drawn on it:
+
+| Zone | Meaning |
+|---|---|
+| grey, below the blue | under `MOVEMENT_MIN`: you get the floor and nothing more |
+| blue ramp | effort is buying stick deflection; fills behind the needle |
+| green | at or past `MOVEMENT_MAX`: full speed |
+| orange outer band | `SPRINT_AT` and up: sprint held |
+
+Beside it are cadence, the stick multiplier against the floor, and chips for
+full speed, sprint, forced movement and no data. The line under the number
+says how far you are from the next threshold. Marks come from the running
+config, so moving a slider on the dials page moves them on the next poll. The
+page only reads, so a knee brushing a phone on the handlebars cannot change
+anything. It polls `/api/live` at 4 Hz, which unlike `/api/state` never reads
+`config.env`.
+
 This exists because the important numbers cannot be judged any other way.
 `MOVEMENT_FLOOR` has to clear a deadzone you cannot see, in a game whose left
 stick is deadzoned harder than its right; the first default was picked from

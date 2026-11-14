@@ -183,6 +183,85 @@ def test_page_is_served():
     serve(body)
 
 
+def test_live_page_is_served_and_self_contained():
+    async def body(port, _server):
+        status, payload = await _request(port, "GET", "/live")
+        assert status == 200
+        assert b"<html" in payload.lower()
+        # The SVG namespace is an identifier, not a fetch; anything else
+        # absolute would be a ride-time dependency on the internet.
+        stripped = payload.replace(b"http://www.w3.org/2000/svg", b"")
+        assert b"http://" not in stripped and b"https://" not in stripped
+        # Read-only: the gauge page must never be able to change a dial.
+        assert b"/api/config" not in payload and b"/api/restart" not in payload
+
+    serve(body)
+
+
+def test_live_reports_running_thresholds():
+    config = MappingConfig()
+    config.movement.enabled = True
+    config.movement.source = "power"
+    config.movement.min_value = 10.0
+    config.movement.max_value = 75.0
+    config.movement.sprint_at = 100.0
+    config.forced_movement.enabled = True
+
+    async def body(port, _server):
+        status, payload = await _request(port, "GET", "/api/live")
+        assert status == 200
+        live = json.loads(payload)
+        t = live["thresholds"]
+        assert t["source"] == "power" and t["unit"] == "W"
+        assert (t["movement_min"], t["movement_max"]) == (10.0, 75.0)
+        assert t["sprint_at"] == 100.0
+        assert t["sprint_release"] == 100.0 * config.movement.sprint_release_ratio
+        assert t["forced_movement"] is True
+        assert live["status"]["power"] == 78
+        # The gauge's marks must follow a dial the moment it moves.
+        config.movement.sprint_at = None
+        _, payload = await _request(port, "GET", "/api/live")
+        t = json.loads(payload)["thresholds"]
+        assert t["sprint_at"] is None and t["sprint_release"] is None
+
+    serve(body, config)
+
+
+def test_live_says_none_when_movement_scaling_is_off():
+    async def body(port, _server):
+        _, payload = await _request(port, "GET", "/api/live")
+        assert json.loads(payload)["thresholds"]["source"] == "none"
+
+    serve(body)
+
+
+def test_live_does_not_read_config_env():
+    """The gauge polls at 4 Hz; parsing config.env on each one is the cost
+    /api/state pays and /api/live exists to avoid."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "config.env")
+        with open(path, "w") as handle:
+            handle.write("FRAME_RATE=60\n")
+
+        async def body(port, server):
+            server._persisted_values = None      # any call would now raise
+            status, _ = await _request(port, "GET", "/api/live")
+            assert status == 200
+
+        serve(body, config_path=path)
+
+
+def test_live_is_behind_the_same_guard():
+    async def body(port, _server):
+        status, _ = await _request(port, "GET", "/api/live",
+                                   headers={"Host": "evil.example"})
+        assert status == 403
+        status, _ = await _request(port, "POST", "/api/live", body={})
+        assert status == 405
+
+    serve(body)
+
+
 def test_unknown_path_is_404():
     async def body(port, _server):
         status, _ = await _request(port, "GET", "/nope")
