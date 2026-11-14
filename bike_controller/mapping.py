@@ -189,6 +189,40 @@ class MovementConfig:
 
 
 @dataclass
+class CruiseConfig:
+    """Pedal to walk forward: the bike pushes the left stick while you ride.
+
+    Off by default, because it changes what the bike is allowed to do. Every
+    other movement feature multiplies the PHYSICAL stick, so a centred stick is
+    zero whatever the bike says. Cruise is the one place the bike alone moves the
+    character, so its evidence has to be stronger than "the console reported a
+    number".
+
+    That evidence is the distance accumulator ADVANCING, not cadence:
+
+      - When you stop, the console repeats your last cadence and power for ~2s
+        (the freeze) but distance stops climbing at once. Cadence would carry
+        you two seconds further than you meant to go; distance stops you in
+        about one sample.
+      - A latched console (the 30-second freeze seen on real hardware) repeats
+        distance too, so it cannot cruise anyone anywhere.
+      - The ~4.5s pause after a stop reports distance 0, so cruise is off for
+        all of it. Pedalling during the pause is thrown away by the console,
+        and nothing here can recover it: a stop longer than ~2s costs a slow
+        restart. The physical stick still walks you at the floor meanwhile.
+
+    A console that reports no distance at all never cruises.
+    """
+
+    enabled: bool = False
+    # Seconds since distance last advanced before you count as stopped. Must
+    # cover the gap between two telemetry samples with margin, or slow pedalling
+    # stutters; much more and the stop stops feeling like a stop. ~1-2.5 Hz
+    # telemetry is 0.4-0.8s between samples.
+    release_after: float = 1.0
+
+
+@dataclass
 class ButtonRule:
     """Holds a button while cadence is at or above min_rpm."""
 
@@ -225,6 +259,7 @@ class MappingConfig:
     gate: GateConfig = field(default_factory=GateConfig)
     axis: AxisConfig = field(default_factory=AxisConfig)
     movement: MovementConfig = field(default_factory=MovementConfig)
+    cruise: CruiseConfig = field(default_factory=CruiseConfig)
     buttons: list[ButtonRule] = field(default_factory=list)
     # None keeps CadenceTracker's default; set it from stale_after_for().
     stale_after: float | None = None
@@ -259,6 +294,31 @@ class MappingOutput:
     # longer stops the rider, so this is the only way they can learn of it.
     degraded: bool = False
     power: float = 0.0
+    # Forward deflection, 0.0-1.0, to push on the left stick while the physical
+    # stick is centred. 0.0 whenever cruise is off or you are not pedalling.
+    cruise: float = 0.0
+
+
+# How far the physical stick must move, as a fraction of full deflection, before
+# it takes over from cruise. Above typical stick drift (a few percent) and below
+# where a deliberate nudge lands, so steering is never fighting the bike.
+CRUISE_TAKEOVER = 0.25
+
+
+def left_stick(x: int, y: int, scale: float, cruise: float,
+               full: int = 32767) -> tuple[int, int]:
+    """The left stick the virtual pad should report.
+
+    The physical stick, scaled -- unless cruise is on and the stick is centred,
+    in which case straight forward at `cruise`. Forward is negative Y on Linux
+    gamepads. Either the rider steers or the bike walks; they are never summed,
+    because a sum would bend every gentle strafe forward.
+    """
+    if cruise > 0 and math.hypot(x, y) < CRUISE_TAKEOVER * full:
+        return 0, -int(round(cruise * full))
+    # Uniform scalar on both components: magnitude scales, direction is
+    # preserved exactly.
+    return int(x * scale), int(y * scale)
 
 
 class Mapper:
@@ -283,6 +343,9 @@ class Mapper:
         self._last_reading: tuple | None = None
         self._reading_changed_at: float | None = None
         self._frozen_reported = False
+        # Cruise's evidence of pedalling: when distance last moved forward.
+        self._distance: int | None = None
+        self._distance_advanced_at: float | None = None
 
     def submit(self, cadence_rpm: float, power_w: float = 0.0,
                now: float | None = None, distance: float | None = None) -> None:
@@ -307,7 +370,24 @@ class Mapper:
             self._reading_changed_at = now
             self._frozen_reported = False
 
+        # Any CHANGE to a non-zero distance counts as pedalling, not only an
+        # increase: the accumulator is a uint16 and wraps. Changes TO zero do
+        # not -- that is the console resetting it at the start of its pause.
+        # The first non-zero sample after the pause also counts, which is right:
+        # telemetry only comes back once you are pedalling again.
+        if (distance is not None and distance != 0 and cadence_rpm > 0
+                and self._distance is not None and distance != self._distance):
+            self._distance_advanced_at = now
+        self._distance = distance
+
         self.tracker.submit(cadence_rpm, now)
+
+    def is_pedalling(self, now: float | None = None) -> bool:
+        """True while the distance accumulator is still climbing."""
+        if self._distance_advanced_at is None or self.tracker.is_stale(now):
+            return False
+        now = time.monotonic() if now is None else now
+        return now - self._distance_advanced_at <= self.config.cruise.release_after
 
     def is_frozen(self, now: float | None = None) -> bool:
         """True when the console has been repeating one reading too long.
@@ -472,6 +552,12 @@ class Mapper:
         # does not: it is logged and left alone, because a buzz mid-firefight is
         # a worse interruption than the fault it announces.
         out.degraded = stale
+
+        # At the scale your effort earned, so working harder still walks you
+        # faster. The scale is 1.0 when movement scaling is off: cruise then
+        # simply means "full forward while pedalling".
+        if self.config.cruise.enabled and self.is_pedalling(now):
+            out.cruise = out.movement_scale
 
         axis = self.config.axis
         if axis.enabled:

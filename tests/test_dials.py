@@ -120,6 +120,7 @@ EXPECTED_BOUNDS = {
     "FRAME_RATE": (5, 1000),
     "RUMBLE_PASSTHROUGH": (0, 1),
     "RIDE_LOG": (0, 1),
+    "CRUISE": (0, 1),
 }
 
 
