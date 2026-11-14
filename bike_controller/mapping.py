@@ -189,12 +189,12 @@ class MovementConfig:
 
 
 @dataclass
-class CruiseConfig:
+class ForcedMovementConfig:
     """Pedal to walk forward: the bike pushes the left stick while you ride.
 
     Off by default, because it changes what the bike is allowed to do. Every
     other movement feature multiplies the PHYSICAL stick, so a centred stick is
-    zero whatever the bike says. Cruise is the one place the bike alone moves the
+    zero whatever the bike says. This is the one place the bike alone moves the
     character, so its evidence has to be stronger than "the console reported a
     number".
 
@@ -205,13 +205,13 @@ class CruiseConfig:
         you two seconds further than you meant to go; distance stops you in
         about one sample.
       - A latched console (the 30-second freeze seen on real hardware) repeats
-        distance too, so it cannot cruise anyone anywhere.
-      - The ~4.5s pause after a stop reports distance 0, so cruise is off for
+        distance too, so it cannot force anyone anywhere.
+      - The ~4.5s pause after a stop reports distance 0, so forcing is off for
         all of it. Pedalling during the pause is thrown away by the console,
         and nothing here can recover it: a stop longer than ~2s costs a slow
         restart. The physical stick still walks you at the floor meanwhile.
 
-    A console that reports no distance at all never cruises.
+    A console that reports no distance at all never forces movement.
     """
 
     enabled: bool = False
@@ -259,7 +259,8 @@ class MappingConfig:
     gate: GateConfig = field(default_factory=GateConfig)
     axis: AxisConfig = field(default_factory=AxisConfig)
     movement: MovementConfig = field(default_factory=MovementConfig)
-    cruise: CruiseConfig = field(default_factory=CruiseConfig)
+    forced_movement: ForcedMovementConfig = field(
+        default_factory=ForcedMovementConfig)
     buttons: list[ButtonRule] = field(default_factory=list)
     # None keeps CadenceTracker's default; set it from stale_after_for().
     stale_after: float | None = None
@@ -295,27 +296,27 @@ class MappingOutput:
     degraded: bool = False
     power: float = 0.0
     # Forward deflection, 0.0-1.0, to push on the left stick while the physical
-    # stick is centred. 0.0 whenever cruise is off or you are not pedalling.
-    cruise: float = 0.0
+    # stick is centred. 0.0 whenever the mode is off or you are not pedalling.
+    forced: float = 0.0
 
 
 # How far the physical stick must move, as a fraction of full deflection, before
-# it takes over from cruise. Above typical stick drift (a few percent) and below
-# where a deliberate nudge lands, so steering is never fighting the bike.
-CRUISE_TAKEOVER = 0.25
+# it takes over from forced movement. Above typical stick drift (a few percent)
+# and below where a deliberate nudge lands, so steering never fights the bike.
+STICK_TAKEOVER = 0.25
 
 
-def left_stick(x: int, y: int, scale: float, cruise: float,
+def left_stick(x: int, y: int, scale: float, forced: float,
                full: int = 32767) -> tuple[int, int]:
     """The left stick the virtual pad should report.
 
-    The physical stick, scaled -- unless cruise is on and the stick is centred,
-    in which case straight forward at `cruise`. Forward is negative Y on Linux
-    gamepads. Either the rider steers or the bike walks; they are never summed,
+    The physical stick, scaled -- unless movement is being forced and the
+    stick is centred, in which case straight forward at `forced`. Forward is
+    negative Y on Linux gamepads. Either the rider steers or the bike walks; they are never summed,
     because a sum would bend every gentle strafe forward.
     """
-    if cruise > 0 and math.hypot(x, y) < CRUISE_TAKEOVER * full:
-        return 0, -int(round(cruise * full))
+    if forced > 0 and math.hypot(x, y) < STICK_TAKEOVER * full:
+        return 0, -int(round(forced * full))
     # Uniform scalar on both components: magnitude scales, direction is
     # preserved exactly.
     return int(x * scale), int(y * scale)
@@ -343,7 +344,7 @@ class Mapper:
         self._last_reading: tuple | None = None
         self._reading_changed_at: float | None = None
         self._frozen_reported = False
-        # Cruise's evidence of pedalling: when distance last moved forward.
+        # Evidence of pedalling for forced movement: when distance last moved.
         self._distance: int | None = None
         self._distance_advanced_at: float | None = None
 
@@ -387,7 +388,8 @@ class Mapper:
         if self._distance_advanced_at is None or self.tracker.is_stale(now):
             return False
         now = time.monotonic() if now is None else now
-        return now - self._distance_advanced_at <= self.config.cruise.release_after
+        release = self.config.forced_movement.release_after
+        return now - self._distance_advanced_at <= release
 
     def is_frozen(self, now: float | None = None) -> bool:
         """True when the console has been repeating one reading too long.
@@ -554,10 +556,10 @@ class Mapper:
         out.degraded = stale
 
         # At the scale your effort earned, so working harder still walks you
-        # faster. The scale is 1.0 when movement scaling is off: cruise then
+        # faster. The scale is 1.0 when movement scaling is off: forcing then
         # simply means "full forward while pedalling".
-        if self.config.cruise.enabled and self.is_pedalling(now):
-            out.cruise = out.movement_scale
+        if self.config.forced_movement.enabled and self.is_pedalling(now):
+            out.forced = out.movement_scale
 
         axis = self.config.axis
         if axis.enabled:

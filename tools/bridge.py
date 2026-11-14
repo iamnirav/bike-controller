@@ -55,7 +55,7 @@ from bike_controller.mapping import (                                # noqa: E40
     GateConfig,
     Mapper,
     MappingConfig,
-    CruiseConfig,
+    ForcedMovementConfig,
     MovementConfig,
     left_stick,
     stale_after_for,
@@ -96,7 +96,7 @@ class Status:
     hz: float = 0.0                     # telemetry rate over the last interval
     resistance: int = 0                 # raw byte, not the console's displayed level
     frozen: bool = False                # console repeating one reading
-    cruise: bool = False                # bike is pushing the stick forward
+    forced: bool = False                # bike is pushing the stick forward
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -560,7 +560,7 @@ async def output_loop(
         status.move = out.movement_scale
         status.frozen = mapper.is_frozen(now)
         status.sprint = out.sprint
-        status.cruise = out.cruise > 0
+        status.forced = out.forced > 0
         # Take power from the same evaluate() that produced `move`, not from the
         # feed task -- otherwise the two can be a sample apart and the status
         # line implies a relationship between them that isn't real.
@@ -584,15 +584,15 @@ async def output_loop(
                 if blocked and code in wiring.gated_axes:
                     continue
                 pad.set_axis(code, value)
-            # Both components together: cruise decides from the stick's
+            # Both components together: forcing decides from the stick's
             # magnitude, which neither axis knows alone. A gated stick reads as
-            # centred, so cruise still applies through a shut gate -- it only
+            # centred, so forcing still applies through a shut gate -- it only
             # fires on proof of pedalling, a stricter test than the gate's.
             if blocked and LEFT_STICK[0] in wiring.gated_axes:
                 x, y = 0, 0
             else:
                 x, y = axes.get(e.ABS_X, 0), axes.get(e.ABS_Y, 0)
-            x, y = left_stick(x, y, out.movement_scale, out.cruise)
+            x, y = left_stick(x, y, out.movement_scale, out.forced)
             pad.set_axis(e.ABS_X, x)
             pad.set_axis(e.ABS_Y, y)
 
@@ -694,7 +694,7 @@ async def status_loop(status: Status, stop: asyncio.Event,
             f"pwr={status.power:4.0f} res={status.resistance:2d} "
             f"move={status.move:4.2f}"
             f"{' SPRINT' if status.sprint else ''}"
-            f"{' CRUISE' if status.cruise else ''}",
+            f"{' FORCED' if status.forced else ''}",
             flush=True,
         )
 
@@ -739,7 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "own lockout). Stopping pedalling makes the console "
                              "pause and report zeros for ~5s, discarding any "
                              "pedalling during it. 0 = no hold, plain floor.")
-    parser.add_argument("--cruise", action="store_true",
+    parser.add_argument("--pedal-forces-movement", action="store_true",
                         help="push the left stick forward while you pedal, "
                              "and stop when you stop. Moving the physical "
                              "stick takes over. Live-switchable from the web "
@@ -873,7 +873,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
             max_rpm=args.axis_max,
         ),
         movement=movement,
-        cruise=CruiseConfig(enabled=args.cruise),
+        forced_movement=ForcedMovementConfig(enabled=args.pedal_forces_movement),
         buttons=args.button,
         # Derived, never hand-set: a fixed window silently stops matching
         # the telemetry rate the moment --poll-interval changes.

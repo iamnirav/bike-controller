@@ -18,9 +18,9 @@ from bike_controller.mapping import (      # noqa: E402
     AxisConfig,
     stale_after_for,
     ButtonRule,
-    CRUISE_TAKEOVER,
+    STICK_TAKEOVER,
     CadenceTracker,
-    CruiseConfig,
+    ForcedMovementConfig,
     GateConfig,
     Mapper,
     MappingConfig,
@@ -814,17 +814,17 @@ def test_sprint_is_released_during_the_grace():
     assert not out.sprint
 
 
-# --- Cruise ---------------------------------------------------------------
+# --- Pedalling forces movement --------------------------------------------
 #
 # The console's stop sequence, as measured (see tools/idle_probe.py): a ~2s
 # FREEZE repeating the last cadence/power with distance stalled, then a ~4.5s
 # PAUSE of all zeros. These drive that shape at the deployed telemetry rate.
 
-def cruise_mapper(**movement_kw) -> Mapper:
+def forced_mapper(**movement_kw) -> Mapper:
     movement = MovementConfig(enabled=True, max_value=75.0, floor=0.5,
                               **movement_kw)
     return Mapper(MappingConfig(movement=movement,
-                                cruise=CruiseConfig(enabled=True),
+                                forced_movement=ForcedMovementConfig(enabled=True),
                                 stale_after=1.5))
 
 
@@ -850,14 +850,14 @@ def hold(mapper, seconds, t0, cadence, power, distance, hz=DEPLOYED_HZ):
     return trace, t
 
 
-def test_cruise_pushes_forward_while_pedalling():
-    mapper = cruise_mapper()
+def test_forced_movement_pushes_forward_while_pedalling():
+    mapper = forced_mapper()
     out, _, _ = ride(mapper, 5.0)
-    assert out.cruise > 0.5, out.cruise
-    assert out.cruise == out.movement_scale
+    assert out.forced > 0.5, out.forced
+    assert out.forced == out.movement_scale
 
 
-def test_cruise_off_by_default():
+def test_forced_movement_off_by_default():
     mapper = Mapper(MappingConfig(movement=MovementConfig(enabled=True)))
     t, d = 0.0, 100
     for _ in range(10):
@@ -865,102 +865,102 @@ def test_cruise_off_by_default():
         mapper.submit(60.0, 70.0, now=t, distance=d)
         out = mapper.evaluate(now=t)
         t += 0.4
-    assert out.cruise == 0.0
+    assert out.forced == 0.0
 
 
-def test_cruise_stops_within_release_during_the_freeze():
+def test_forced_movement_stops_within_release_during_the_freeze():
     """The whole point of watching distance: the freeze keeps reporting your
-    cadence for ~2s, but cruise must let go after ~release_after."""
-    mapper = cruise_mapper()
+    cadence for ~2s, but forcing must let go after ~release_after."""
+    mapper = forced_mapper()
     _, t, d = ride(mapper, 5.0)
     trace, _ = hold(mapper, 2.0, t, 60.0, 70.0, d)
-    released = [dt for dt, out in trace if out.cruise == 0.0]
-    assert released, "cruise held through the whole freeze"
-    assert released[0] <= mapper.config.cruise.release_after + 0.5, released[0]
+    released = [dt for dt, out in trace if out.forced == 0.0]
+    assert released, "forcing held through the whole freeze"
+    assert released[0] <= mapper.config.forced_movement.release_after + 0.5, released[0]
     # and once released, it stays released for the rest of the freeze
-    assert all(out.cruise == 0.0 for dt, out in trace if dt >= released[0])
+    assert all(out.forced == 0.0 for dt, out in trace if dt >= released[0])
 
 
-def test_cruise_off_through_the_pause_and_back_on_after():
-    mapper = cruise_mapper()
+def test_forced_movement_off_through_the_pause_and_back_on_after():
+    mapper = forced_mapper()
     _, t, d = ride(mapper, 5.0)
     _, t = hold(mapper, 2.0, t, 60.0, 70.0, d)
     trace, t = hold(mapper, 4.5, t, 0.0, 0.0, 0)
-    assert all(out.cruise == 0.0 for _, out in trace)
+    assert all(out.forced == 0.0 for _, out in trace)
     out, _, _ = ride(mapper, 1.0, t0=t, distance0=d + 30)
-    assert out.cruise > 0.0
+    assert out.forced > 0.0
 
 
-def test_latched_console_cannot_cruise():
+def test_latched_console_cannot_force_movement():
     """The 30s freeze seen on real hardware repeats distance too."""
-    mapper = cruise_mapper()
+    mapper = forced_mapper()
     _, t, d = ride(mapper, 5.0)
     trace, _ = hold(mapper, 30.0, t, 51.0, 60.0, d)
-    assert all(out.cruise == 0.0 for dt, out in trace if dt > 2.0)
+    assert all(out.forced == 0.0 for dt, out in trace if dt > 2.0)
 
 
-def test_silent_link_cannot_cruise():
-    mapper = cruise_mapper()
+def test_silent_link_cannot_force_movement():
+    mapper = forced_mapper()
     _, t, _ = ride(mapper, 5.0)
     out = mapper.evaluate(now=t + 2.0)
-    assert out.cruise == 0.0
+    assert out.forced == 0.0
 
 
-def test_no_distance_never_cruises():
-    mapper = cruise_mapper()
+def test_no_distance_never_forces_movement():
+    mapper = forced_mapper()
     t = 0.0
     for _ in range(20):
         mapper.submit(60.0, 70.0, now=t, distance=None)
         out = mapper.evaluate(now=t)
         t += 0.4
-    assert out.cruise == 0.0
+    assert out.forced == 0.0
 
 
 def test_distance_wrap_counts_as_pedalling():
-    mapper = cruise_mapper()
+    mapper = forced_mapper()
     mapper.submit(60.0, 70.0, now=0.0, distance=65533)
     mapper.submit(60.0, 70.0, now=0.4, distance=3)
-    assert mapper.evaluate(now=0.4).cruise > 0.0
+    assert mapper.evaluate(now=0.4).forced > 0.0
 
 
 def test_reset_to_zero_is_not_pedalling():
-    mapper = cruise_mapper()
+    mapper = forced_mapper()
     mapper.submit(60.0, 70.0, now=0.0, distance=500)
     mapper.submit(60.0, 70.0, now=0.4, distance=0)
-    assert mapper.evaluate(now=0.4).cruise == 0.0
+    assert mapper.evaluate(now=0.4).forced == 0.0
 
 
-def test_cruise_scales_with_effort():
-    easy = cruise_mapper()
-    hard = cruise_mapper()
+def test_forced_movement_scales_with_effort():
+    easy = forced_mapper()
+    hard = forced_mapper()
     easy_out, _, _ = ride(easy, 3.0, power=10.0)
     hard_out, _, _ = ride(hard, 3.0, power=75.0)
-    assert easy_out.cruise < hard_out.cruise == 1.0
+    assert easy_out.forced < hard_out.forced == 1.0
 
 
-def test_cruise_can_be_switched_live():
-    mapper = cruise_mapper()
+def test_forced_movement_can_be_switched_live():
+    mapper = forced_mapper()
     _, t, d = ride(mapper, 3.0)
-    mapper.config.cruise.enabled = False
+    mapper.config.forced_movement.enabled = False
     out, _, _ = ride(mapper, 1.0, t0=t, distance0=d)
-    assert out.cruise == 0.0
+    assert out.forced == 0.0
 
 
-def test_left_stick_centred_gets_cruise_forward():
+def test_left_stick_centred_is_forced_forward():
     assert left_stick(0, 0, 0.8, 0.8) == (0, -26214)
     # drift below the takeover threshold is still "centred"
     assert left_stick(2000, -1500, 0.8, 0.8) == (0, -26214)
 
 
-def test_left_stick_deflected_overrides_cruise():
+def test_left_stick_deflected_overrides_forcing():
     full = 32767
-    x = int(CRUISE_TAKEOVER * full) + 100
+    x = int(STICK_TAKEOVER * full) + 100
     assert left_stick(x, 0, 0.5, 0.9) == (int(x * 0.5), 0)
     # pulling back is honoured, not summed with forward
     assert left_stick(0, 30000, 0.5, 0.9) == (0, 15000)
 
 
-def test_left_stick_without_cruise_is_plain_scaling():
+def test_left_stick_unforced_is_plain_scaling():
     assert left_stick(0, 0, 0.5, 0.0) == (0, 0)
     assert left_stick(1000, -2000, 0.5, 0.0) == (500, -1000)
 

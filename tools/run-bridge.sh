@@ -25,7 +25,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${FROZEN_AFTER:=4}"
 : "${MOVEMENT_FLOOR:=0.5}"
 : "${MOVEMENT_GRACE:=5}"
-: "${CRUISE:=0}"
+: "${PEDAL_FORCES_MOVEMENT:=0}"
 : "${WEB_PORT:=8080}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 # The real home, not /home/<user>: correct for root and for any account
@@ -51,7 +51,7 @@ args=(
 # Likewise: blank means sprint is off, not "use the default".
 [ -n "${SPRINT_AT}" ] && args+=(--sprint-at "$SPRINT_AT")
 [ "$RUMBLE_PASSTHROUGH" != "0" ] && args+=(--rumble-passthrough)
-[ "$CRUISE" != "0" ] && args+=(--cruise)
+[ "$PEDAL_FORCES_MOVEMENT" != "0" ] && args+=(--pedal-forces-movement)
 [ "$RIDE_LOG" != "0" ] && args+=(--ride-log "$RIDE_LOG_DIR")
 
 exec "$REPO/.venv/bin/python" -u "$REPO/tools/bridge.py" "${args[@]}"

@@ -120,9 +120,10 @@ DIALS: tuple[Dial, ...] = (
              "on the ~2s freeze before it. 0 is no hold.",
     ),
     Dial(
-        key="CRUISE", arg="cruise", label="Cruise (pedal to walk)", kind="bool",
+        key="PEDAL_FORCES_MOVEMENT", arg="pedal_forces_movement",
+        label="Pedalling forces movement", kind="bool",
         minimum=0, maximum=1, step=1,
-        path="cruise.enabled",
+        path="forced_movement.enabled",
         help="Pedalling pushes the left stick forward; stop pedalling and you "
              "stop within about a second. Move the stick and it takes over. "
              "Stops longer than ~2s trigger the console's pause, so the bike "
