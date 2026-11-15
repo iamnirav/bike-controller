@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<!--
+  Live gauge: what the bike is telling the game, right now. Served by
+  bike_controller/webconfig.py at /live, polling /api/live.
+
+  Read-only on purpose. It sends nothing but GETs, so a phone propped on the
+  handlebars can be left on this page and brushed by a knee without changing a
+  dial. The tuning page is one tap away for that.
+
+  The thresholds drawn on the dial come from the RUNNING config, not from
+  config.env, so moving a slider on the dials page moves the marks here on the
+  next poll.
+
+  Self-contained like index.html: no CDN, no build step.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Bike live</title>
+<style>
+  :root {
+    --bg: #12141a; --card: #1c1f28; --line: #2c3040;
+    --text: #e8eaf0; --dim: #949bb0; --faint: #3a3f52;
+    --accent: #4ea1ff; --good: #45d17a; --warn: #ffb545; --bad: #ff5f56;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; max-width: 980px; margin-inline: auto;
+  }
+  nav { display: flex; justify-content: space-between; align-items: center;
+    font-size: .85rem; color: var(--dim); }
+  nav a { color: var(--accent); text-decoration: none; padding: 8px 2px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px; vertical-align: 1px; }
+  .ok .dot { background: var(--good); }
+  .bad .dot { background: var(--bad); }
+
+  main { flex: 1; display: grid; gap: 12px; grid-template-columns: 1fr;
+    align-content: center; }
+  @media (orientation: landscape) and (min-width: 600px) {
+    main { grid-template-columns: 3fr 2fr; align-items: center; }
+  }
+
+  .gauge { width: 100%; max-height: 70vh; display: block; }
+  .gauge text { font-variant-numeric: tabular-nums; }
+  .tick-label { fill: var(--dim); font-size: 7px; text-anchor: middle; }
+  .zone { fill: none; stroke-width: 11; transition: opacity .3s; }
+  .zone.off { opacity: .28; }
+  #needle { transition: transform .35s ease-out; transform-origin: 100px 100px; }
+  #needle line { stroke: var(--text); stroke-width: 2.6; stroke-linecap: round; }
+  .stale #needle line { stroke: var(--faint); }
+  #big { font-size: 30px; font-weight: 700; text-anchor: middle; fill: var(--text); }
+  #big-unit { font-size: 8px; text-anchor: middle; fill: var(--dim);
+    letter-spacing: .8px; text-transform: uppercase; }
+  #verdict { font-size: 9.5px; font-weight: 600; text-anchor: middle; }
+
+  .side { display: grid; gap: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 10px 14px 12px; }
+  .card h2 { margin: 0 0 2px; font-size: .7rem; font-weight: 500; color: var(--dim);
+    text-transform: uppercase; letter-spacing: .7px; }
+  .num { font-size: 2.6rem; font-weight: 700; font-variant-numeric: tabular-nums;
+    line-height: 1.1; }
+  .num small { font-size: .9rem; color: var(--dim); font-weight: 400; margin-left: 4px; }
+
+  .bar { position: relative; height: 14px; background: var(--line);
+    border-radius: 7px; overflow: hidden; margin-top: 6px; }
+  .bar .fill { position: absolute; inset: 0 auto 0 0; width: 0;
+    background: var(--accent); border-radius: 7px; transition: width .35s ease-out; }
+  .bar .mark { position: absolute; top: 0; bottom: 0; width: 2px;
+    background: var(--text); opacity: .55; }
+  .bar-legend { display: flex; justify-content: space-between; font-size: .72rem;
+    color: var(--dim); margin-top: 3px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: .78rem; font-weight: 600; padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--faint); letter-spacing: .4px; }
+  .chip.on { color: #000; border-color: transparent; }
+  .chip.on.sprint { background: var(--warn); }
+  .chip.on.full { background: var(--good); }
+  .chip.on.forced { background: var(--accent); }
+  .chip.on.fault { background: var(--bad); }
+</style>
+</head>
+<body>
+
+<nav>
+  <span id="link"><span class="dot"></span><span id="link-text">connecting…</span></span>
+  <a href="/">Dials →</a>
+</nav>
+
+<main>
+  <svg class="gauge" id="gauge" viewBox="-14 0 228 168" role="img"
+       aria-label="Effort gauge">
+    <g id="zones"></g>
+    <g id="ticks"></g>
+    <g id="needle"><line x1="100" y1="100" x2="100" y2="30"/></g>
+    <circle cx="100" cy="100" r="5" style="fill: var(--text)"/>
+    <text id="big" x="100" y="137">–</text>
+    <text id="big-unit" x="100" y="148">watts</text>
+    <text id="verdict" x="100" y="162"></text>
+  </svg>
+
+  <div class="side">
+    <div class="card">
+      <h2>Cadence</h2>
+      <div class="num" id="cadence">–<small>rpm</small></div>
+      <div class="bar"><div class="fill" id="cadence-fill"></div></div>
+      <div class="bar-legend"><span>0</span><span id="cadence-max">120</span></div>
+    </div>
+    <div class="card">
+      <h2>Stick speed</h2>
+      <div class="num" id="move">–<small>%</small></div>
+      <div class="bar"><div class="fill" id="move-fill"></div>
+        <div class="mark" id="floor-mark" title="floor"></div></div>
+      <div class="bar-legend"><span id="floor-label">floor</span><span>full</span></div>
+    </div>
+    <div class="chips">
+      <span class="chip full" id="c-full">FULL SPEED</span>
+      <span class="chip sprint" id="c-sprint">SPRINT</span>
+      <span class="chip forced" id="c-forced">FORCED</span>
+      <span class="chip fault" id="c-fault">NO DATA</span>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SVG = "http://www.w3.org/2000/svg";
+const CX = 100, CY = 100, R = 78;
+const SWEEP = 240;                     // degrees, centred on straight up
+const CADENCE_MAX = 120;
+
+/* Angle in degrees clockwise from straight up, for a value on the dial. */
+function angle(v, max) {
+  const f = Math.min(1, Math.max(0, v / max));
+  return -SWEEP / 2 + SWEEP * f;
+}
+function point(deg, r) {
+  const t = deg * Math.PI / 180;
+  return [CX + r * Math.sin(t), CY - r * Math.cos(t)];
+}
+function arc(v1, v2, max, r) {
+  const a1 = angle(v1, max), a2 = angle(v2, max);
+  const [x1, y1] = point(a1, r), [x2, y2] = point(a2, r);
+  const large = a2 - a1 > 180 ? 1 : 0;
+  return `M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 ${large} 1 ` +
+         `${x2.toFixed(2)} ${y2.toFixed(2)}`;
+}
+/* Colours go through style, not attributes: an SVG presentation attribute
+   does not resolve var(), so fill="var(--warn)" silently paints black. */
+function el(tag, attrs, parent) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "stroke" || k === "fill") node.style[k] = v;
+    else node.setAttribute(k, v);
+  }
+  parent.append(node);
+  return node;
+}
+
+/* A round top for the dial: 20% past the highest threshold, so both full speed
+   and sprint sit well inside the sweep with room to show you clearing them. */
+function dialMax(t) {
+  if (t.source === "none") return CADENCE_MAX;
+  const top = Math.max(t.movement_max, t.sprint_at || 0, 1) * 1.2;
+  const step = t.unit === "W" ? 25 : 10;
+  return Math.ceil(top / step) * step;
+}
+
+let drawnFor = "";
+let zones = {};
+let max = 100;
+
+/* Rebuilt only when a threshold changes, not every poll. */
+function drawDial(t) {
+  const key = JSON.stringify(t);
+  if (key === drawnFor) return;
+  drawnFor = key;
+  max = dialMax(t);
+  const z = $("zones"), ticks = $("ticks");
+  z.replaceChildren(); ticks.replaceChildren();
+  zones = {};
+
+  const zone = (name, from, to, color, r = R) => {
+    if (to <= from) return;
+    zones[name] = el("path", { d: arc(from, to, max, r), stroke: color,
+                               class: "zone" }, z);
+  };
+  if (t.source === "none") {
+    zone("all", 0, max, "var(--accent)");
+  } else {
+    // Below the start: you have the floor and nothing more.
+    zone("below", 0, t.movement_min, "var(--faint)");
+    // The ramp: effort is buying stick deflection. Drawn in slices of rising
+    // strength so the dial itself says "more is faster" here.
+    const slices = 8, span = t.movement_max - t.movement_min;
+    for (let i = 0; i < slices; i++) {
+      const from = t.movement_min + span * i / slices;
+      const to = t.movement_min + span * (i + 1) / slices;
+      zone("ramp" + i, from, to,
+           `color-mix(in srgb, var(--accent) ${35 + 65 * (i + 1) / slices}%, var(--faint))`);
+    }
+    zone("full", t.movement_max, max, "var(--good)");
+    // Sprint rides on an outer band, because it overlaps the other zones
+    // rather than following them.
+    if (t.sprint_at !== null) {
+      zones.sprint = el("path", { d: arc(t.sprint_at, max, max, R + 10),
+        stroke: "var(--warn)", class: "zone", "stroke-width": 4 }, z);
+    }
+  }
+
+  // Numbers around the rim.
+  const step = max <= 60 ? 10 : max <= 150 ? 25 : max <= 300 ? 50 : 100;
+  for (let v = 0; v <= max + 1e-6; v += step) {
+    const a = angle(v, max);
+    const [x1, y1] = point(a, R - 8), [x2, y2] = point(a, R - 13);
+    el("line", { x1, y1, x2, y2, stroke: "var(--dim)", "stroke-width": 1 }, ticks);
+    const [lx, ly] = point(a, R - 21);
+    el("text", { x: lx, y: ly + 2.5, class: "tick-label" }, ticks).textContent = v;
+  }
+  // Threshold marks, labelled where they are not obvious from the colours.
+  const mark = (v, color, label, r) => {
+    const a = angle(v, max);
+    const [x1, y1] = point(a, R - 6), [x2, y2] = point(a, r);
+    el("line", { x1, y1, x2, y2, stroke: color, "stroke-width": 2 }, ticks);
+    if (label) {
+      const [lx, ly] = point(a, r + 7);
+      el("text", { x: lx, y: ly + 2.5, class: "tick-label", fill: color },
+         ticks).textContent = label;
+    }
+  };
+  if (t.source !== "none") {
+    if (t.movement_min > 0) mark(t.movement_min, "var(--accent)", "", R + 6);
+    mark(t.movement_max, "var(--good)", "", R + 6);
+    if (t.sprint_at !== null) mark(t.sprint_at, "var(--warn)", "sprint", R + 16);
+  }
+
+  $("big-unit").textContent = t.source === "none" ? "rpm"
+    : t.unit === "W" ? "watts" : "rpm";
+  const floorPct = Math.round(t.floor * 100);
+  $("floor-mark").style.left = floorPct + "%";
+  $("floor-mark").style.display = t.source === "none" || !t.floor ? "none" : "";
+  $("floor-label").textContent = t.floor ? `floor ${floorPct}%` : "0";
+  $("c-forced").style.display = t.forced_movement ? "" : "none";
+}
+
+function paint(data) {
+  const s = data.status, t = data.thresholds;
+  drawDial(t);
+
+  const effort = t.source === "none" ? s.cadence
+    : t.source === "power" ? s.power : s.cadence;
+  const stale = s.age === null || s.age > (t.stale_after || 1.5)
+    || !(s.bike === "connected" || s.bike === "simulated");
+
+  $("gauge").classList.toggle("stale", stale);
+  $("needle").style.transform = `rotate(${angle(stale ? 0 : effort, max)}deg)`;
+  $("big").textContent = stale ? "–" : Math.round(effort);
+
+  // Light what the needle has reached; dim the rest. Ramp slices fill up
+  // behind the needle like a bar, so the dial reads at a glance.
+  const span = t.movement_max - t.movement_min;
+  for (const [name, path] of Object.entries(zones)) {
+    let on;
+    if (stale) on = false;
+    else if (name === "all") on = true;
+    else if (name === "below") on = effort < t.movement_min;
+    else if (name === "full") on = effort >= t.movement_max;
+    else if (name === "sprint") on = !!s.sprint;
+    else on = effort > t.movement_min + span * Number(name.slice(4)) / 8;
+    path.classList.toggle("off", !on);
+  }
+
+  // The verdict: the one line that answers "am I there yet?".
+  const v = $("verdict");
+  if (stale) {
+    v.textContent = s.bike === "connected" ? "waiting for the bike…" : "bike " + s.bike;
+    v.style.fill = "var(--dim)";
+  } else if (t.source === "none") {
+    v.textContent = "movement scaling off";
+    v.style.fill = "var(--dim)";
+  } else if (s.sprint) {
+    v.textContent = "SPRINTING";
+    v.style.fill = "var(--warn)";
+  } else if (effort >= t.movement_max) {
+    v.textContent = t.sprint_at !== null
+      ? `full speed · ${Math.max(0, Math.ceil(t.sprint_at - effort))} ${t.unit} to sprint`
+      : "full speed";
+    v.style.fill = "var(--good)";
+  } else if (effort >= t.movement_min) {
+    v.textContent = `${Math.ceil(t.movement_max - effort)} ${t.unit} to full speed`;
+    v.style.fill = "var(--accent)";
+  } else {
+    v.textContent = "below movement start";
+    v.style.fill = "var(--dim)";
+  }
+
+  $("cadence").firstChild.nodeValue = stale ? "–" : Math.round(s.cadence);
+  $("cadence-fill").style.width =
+    (stale ? 0 : Math.min(100, 100 * s.cadence / CADENCE_MAX)) + "%";
+  $("move").firstChild.nodeValue = Math.round(s.move * 100);
+  $("move-fill").style.width = Math.min(100, s.move * 100) + "%";
+  $("move-fill").style.background = s.move >= 0.999 ? "var(--good)" : "var(--accent)";
+
+  $("c-full").classList.toggle("on", !stale && t.source !== "none"
+                                     && effort >= t.movement_max);
+  $("c-sprint").classList.toggle("on", !!s.sprint);
+  $("c-forced").classList.toggle("on", !!s.forced);
+  $("c-fault").classList.toggle("on", stale || s.frozen);
+  $("c-fault").textContent = s.frozen ? "FROZEN" : "NO DATA";
+
+  const link = $("link");
+  link.className = stale || s.frozen ? "bad" : "ok";
+  let text = "bike " + s.bike;
+  if (s.age !== null) text += ` · ${s.age.toFixed(1)}s ago`;
+  text += ` · ${s.hz.toFixed(1)} Hz`;
+  $("link-text").textContent = text;
+}
+
+/* 4 Hz: about twice the telemetry rate, so a new sample shows within ~250 ms
+   of arriving. The needle's CSS transition fills in between. One request at a
+   time, so a slow answer never stacks up behind itself. */
+let busy = false;
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  try {
+    paint(await (await fetch("/api/live")).json());
+  } catch (err) {
+    $("link").className = "bad";
+    $("link-text").textContent = "no connection to the bridge";
+    $("gauge").classList.add("stale");
+  } finally {
+    busy = false;
+  }
+}
+
+/* A phone on the handlebars should not go to sleep mid-ride. Only offered by
+   browsers in a secure context (https or localhost), so over plain http to the
+   Pi this is usually a no-op -- set the phone's own auto-lock instead. */
+async function stayAwake() {
+  try { if (navigator.wakeLock) await navigator.wakeLock.request("screen"); }
+  catch (err) { /* not available here; harmless */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") stayAwake();
+});
+stayAwake();
+
+refresh();
+setInterval(refresh, 250);
+</script>
+</body>
+</html>

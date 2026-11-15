@@ -323,6 +323,43 @@ else is left alone. The buzz went too — a rumble mid-firefight is a worse
 interruption than the fault it announces, and the journal line is enough to
 diagnose it afterwards. Silence, which is a different fault, still buzzes.
 
+### Pedalling forces movement
+
+In the normal mode, pedalling only *lets* you move: it scales the stick you are
+already pushing. In this mode pedalling *forces* movement: the bike pushes the
+stick for you, and the only way to stop is to stop pedalling.
+
+Off by default; turn it on with `PEDAL_FORCES_MOVEMENT=1`,
+`--pedal-forces-movement`, or the switch on the config page (live). While you pedal, the bike pushes the left stick **forward**
+at the scale your effort earns. Stop pedalling and it lets go. Move the physical
+stick past a quarter of its throw and your stick takes over completely, so you
+can still steer, strafe and back up. The two are never added together, because
+a sum would bend every gentle strafe forward.
+
+This is the one feature where the bike moves the character on its own, so it
+needs stronger evidence than everything else. "Pedalling" means the **distance
+counter is still climbing**, not that cadence is above zero:
+
+| | Cadence says | Distance says |
+|---|---|---|
+| You stop | your last value, for the ~2s freeze | stopped, within ~1s (`release_after`) |
+| The ~4.5s pause | 0 | 0 |
+| A latched console | a confident lie | stopped |
+| BLE goes silent | decays over seconds | stopped |
+
+A console with no distance field never forces movement.
+
+**The cost is restarting.** A pause shorter than ~2s ends inside the freeze,
+so distance picks up straight away and you move straight away, which is the case
+this mode is for. A longer stop runs into the console's pause, which discards
+pedalling. The bike cannot walk you again until the pause ends, up to ~4.5s later.
+The physical stick still walks you at the floor meanwhile.
+
+Expect trouble in menus that the left stick scrolls: pedalling there holds "up".
+Stop pedalling, or switch the mode off, for those. The ~1s release has not been
+checked against coast-down on a real ride: the flywheel may tick distance on
+briefly after your feet stop.
+
 ### Why the lower bound is 0
 
 `--movement-min` defaults to **0**, which looks like it would let a feeble pedal
@@ -486,6 +523,7 @@ them live and writes them back to `config.env`.
 | `--web-bind` | `0.0.0.0` | address the config page listens on |
 | `--config-file` | `./config.env` | where the page persists dial changes |
 | `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen and its held buttons are released; 0 disables |
+| `--pedal-forces-movement` | off | pedalling pushes the left stick forward; see [Pedalling forces movement](#pedalling-forces-movement) |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
@@ -541,6 +579,25 @@ next output frame** — you drag the movement floor while pedalling, in the game
 and feel the change immediately. Values are also written back to `config.env`,
 so what you tuned on the bike is what starts next boot.
 
+**`/live`** is a speedometer for the ride itself, e.g. `http://pi-2.local:8080/live`.
+The dial reads your effort in the units movement scales by (watts in production),
+with the thresholds drawn on it:
+
+| Zone | Meaning |
+|---|---|
+| grey, below the blue | under `MOVEMENT_MIN`: you get the floor and nothing more |
+| blue ramp | effort is buying stick deflection; fills behind the needle |
+| green | at or past `MOVEMENT_MAX`: full speed |
+| orange outer band | `SPRINT_AT` and up: sprint held |
+
+Beside it are cadence, the stick multiplier against the floor, and chips for
+full speed, sprint, forced movement and no data. The line under the number
+says how far you are from the next threshold. Marks come from the running
+config, so moving a slider on the dials page moves them on the next poll. The
+page only reads, so a knee brushing a phone on the handlebars cannot change
+anything. It polls `/api/live` at 4 Hz, which unlike `/api/state` never reads
+`config.env`.
+
 This exists because the important numbers cannot be judged any other way.
 `MOVEMENT_FLOOR` has to clear a deadzone you cannot see, in a game whose left
 stick is deadzoned harder than its right; the first default was picked from
@@ -553,6 +610,7 @@ another ride.
 | `MOVEMENT_MAX` | yes | effort giving full stick deflection, watts |
 | `MOVEMENT_MIN` | yes | effort at which movement starts |
 | `MOVEMENT_FLOOR` | yes | baseline multiplier at any effort including none |
+| `PEDAL_FORCES_MOVEMENT` | yes | pedalling pushes the left stick forward |
 | `SPRINT_AT` | yes | effort holding the sprint button; can be switched off |
 | `FROZEN_AFTER` | yes | freeze-guard window; 0 disables |
 | `POLL_INTERVAL` | restart | BLE poll spacing |

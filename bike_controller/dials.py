@@ -120,6 +120,17 @@ DIALS: tuple[Dial, ...] = (
              "on the ~2s freeze before it. 0 is no hold.",
     ),
     Dial(
+        key="PEDAL_FORCES_MOVEMENT", arg="pedal_forces_movement",
+        label="Pedalling forces movement", kind="bool",
+        minimum=0, maximum=1, step=1,
+        path="forced_movement.enabled",
+        help="Pedalling pushes the left stick forward; stop pedalling and you "
+             "stop within about a second. Move the stick and it takes over. "
+             "Stops longer than ~2s trigger the console's pause, so the bike "
+             "cannot walk you again for a few seconds -- the stick still works "
+             "meanwhile. Turn off in menus that scroll with the stick.",
+    ),
+    Dial(
         key="SPRINT_AT", arg="sprint_at", label="Sprint at", kind="float",
         minimum=20.0, maximum=600.0, step=5.0, unit="W",
         path="movement.sprint_at", nullable=True,
