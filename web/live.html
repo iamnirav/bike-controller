@@ -85,6 +85,8 @@
   .chip.on.sprint { background: var(--warn); }
   .chip.on.full { background: var(--good); }
   .chip.on.forced { background: var(--accent); }
+  .chip.on.sensor { background: var(--accent); }
+  .sub { font-size: .78rem; color: var(--dim); margin-top: 6px; }
   .chip.on.fault { background: var(--bad); }
 </style>
 </head>
@@ -113,6 +115,7 @@
       <div class="num" id="cadence">–<small>rpm</small></div>
       <div class="bar"><div class="fill" id="cadence-fill"></div></div>
       <div class="bar-legend"><span>0</span><span id="cadence-max">120</span></div>
+      <div class="sub" id="crank-line" style="display:none"></div>
     </div>
     <div class="card">
       <h2>Stick speed</h2>
@@ -125,6 +128,7 @@
       <span class="chip full" id="c-full">FULL SPEED</span>
       <span class="chip sprint" id="c-sprint">SPRINT</span>
       <span class="chip forced" id="c-forced">FORCED</span>
+      <span class="chip sensor" id="c-sensor" title="the cadence sensor is standing in for the paused console">SENSOR</span>
       <span class="chip fault" id="c-fault">NO DATA</span>
     </div>
   </div>
@@ -249,6 +253,8 @@ function drawDial(t) {
   $("floor-mark").style.display = t.source === "none" || !t.floor ? "none" : "";
   $("floor-label").textContent = t.floor ? `floor ${floorPct}%` : "0";
   $("c-forced").style.display = t.forced_movement ? "" : "none";
+  $("c-sensor").style.display = t.crank_sensor ? "" : "none";
+  $("crank-line").style.display = t.crank_sensor ? "" : "none";
 }
 
 function paint(data) {
@@ -302,9 +308,15 @@ function paint(data) {
     v.style.fill = "var(--dim)";
   }
 
-  $("cadence").firstChild.nodeValue = stale ? "–" : Math.round(s.cadence);
+  // While the console is paused it reads 0; the sensor is the truth then.
+  const cadence = s.from_sensor ? (s.crank_rpm ?? 0) : s.cadence;
+  $("cadence").firstChild.nodeValue = stale ? "–" : Math.round(cadence);
   $("cadence-fill").style.width =
-    (stale ? 0 : Math.min(100, 100 * s.cadence / CADENCE_MAX)) + "%";
+    (stale ? 0 : Math.min(100, 100 * cadence / CADENCE_MAX)) + "%";
+  $("crank-line").textContent = s.crank !== "connected" ? "sensor " + s.crank
+    : "sensor " + (s.crank_rpm === null ? (s.crank_turning ? "turning" : "–")
+                   : Math.round(s.crank_rpm) + " rpm")
+      + (s.crank_name ? " · " + s.crank_name : "");
   $("move").firstChild.nodeValue = Math.round(s.move * 100);
   $("move-fill").style.width = Math.min(100, s.move * 100) + "%";
   $("move-fill").style.background = s.move >= 0.999 ? "var(--good)" : "var(--accent)";
@@ -313,6 +325,7 @@ function paint(data) {
                                      && effort >= t.movement_max);
   $("c-sprint").classList.toggle("on", !!s.sprint);
   $("c-forced").classList.toggle("on", !!s.forced);
+  $("c-sensor").classList.toggle("on", !!s.from_sensor);
   $("c-fault").classList.toggle("on", stale || s.frozen);
   $("c-fault").textContent = s.frozen ? "FROZEN" : "NO DATA";
 

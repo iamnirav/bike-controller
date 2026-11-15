@@ -26,6 +26,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${MOVEMENT_FLOOR:=0.5}"
 : "${MOVEMENT_GRACE:=5}"
 : "${PEDAL_FORCES_MOVEMENT:=0}"
+: "${CADENCE_SENSOR:=0}"
 : "${WEB_PORT:=8080}"
 : "${DESKTOP_USER:=$(stat -c '%U' "$REPO")}"
 # The real home, not /home/<user>: correct for root and for any account
@@ -52,6 +53,9 @@ args=(
 [ -n "${SPRINT_AT}" ] && args+=(--sprint-at "$SPRINT_AT")
 [ "$RUMBLE_PASSTHROUGH" != "0" ] && args+=(--rumble-passthrough)
 [ "$PEDAL_FORCES_MOVEMENT" != "0" ] && args+=(--pedal-forces-movement)
+[ "$CADENCE_SENSOR" != "0" ] && args+=(--cadence-sensor)
+# Blank means "the nearest cadence sensor found".
+[ -n "${CADENCE_SENSOR_ADDRESS:-}" ] && args+=(--cadence-sensor-address "$CADENCE_SENSOR_ADDRESS")
 [ "$RIDE_LOG" != "0" ] && args+=(--ride-log "$RIDE_LOG_DIR")
 
 exec "$REPO/.venv/bin/python" -u "$REPO/tools/bridge.py" "${args[@]}"

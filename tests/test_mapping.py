@@ -27,6 +27,7 @@ from bike_controller.mapping import (      # noqa: E402
     MovementConfig,
     left_stick,
 )
+from bike_controller.csc import CrankReading      # noqa: E402
 
 # Two telemetry rates, a slow one and a fast one. Tests default to the SLOWER
 # because it is the harder case for the fail-safe, but the fast one is exercised
@@ -963,6 +964,223 @@ def test_left_stick_deflected_overrides_forcing():
 def test_left_stick_unforced_is_plain_scaling():
     assert left_stick(0, 0, 0.5, 0.0) == (0, 0)
     assert left_stick(1000, -2000, 0.5, 0.0) == (500, -1000)
+
+
+# --- The crank sensor -------------------------------------------------------
+#
+# The console's stop sequence again -- ~2s freeze, then ~5s of zeros -- but now
+# with a Bluetooth crank sensor reporting alongside it. These pin the promise
+# made to the rider: with the sensor, stopping is a stop and pedalling through
+# the pause is pedalling; without it, nothing changes.
+
+class Crank:
+    """A crank sensor attached to `mapper`, turning when told to."""
+
+    def __init__(self, mapper, connected=True):
+        self.mapper, self.revs, self.ticks = mapper, 0, 0
+        if connected:
+            mapper.crank.link_up()
+        mapper.crank.submit(CrankReading(0, 0), now=-100.0)   # baseline
+
+    def turns(self, start, end, rpm=60.0):
+        """Revolutions at `rpm` from start (exclusive) to end (inclusive)."""
+        period = 60.0 / rpm
+        t = start + period
+        while t <= end + 1e-9:
+            self.revs += 1
+            self.ticks += round(period * 1024)
+            self.mapper.crank.submit(
+                CrankReading(self.revs & 0xFFFF, self.ticks & 0xFFFF), now=t)
+            t += period
+
+
+def sensor_mapper(enabled=True, **movement_kw):
+    m = forced_mapper(**movement_kw)
+    m.config.crank_sensor.enabled = enabled
+    return m
+
+
+def stop_sequence(m, crank, pedal_through=False, rpm=60.0):
+    """Ride 5s, freeze 2s, then pause. Returns (t_pause_start, distance)."""
+    crank.turns(-1.0, 5.0, rpm)
+    _, t, d = ride(m, 5.0)
+    trace, t = hold(m, 2.0, t, 60.0, 70.0, d)
+    m.submit(0, 0, now=t, distance=0)
+    return t, d, trace
+
+
+def pause(m, t0, seconds):
+    """Zeros at the deployed rate; returns the outputs with their offsets."""
+    t, trace = t0, []
+    while t < t0 + seconds:
+        m.submit(0, 0, now=t, distance=0)
+        trace.append((t - t0, m.evaluate(now=t)))
+        t += 1.0 / DEPLOYED_HZ
+    return trace
+
+
+def test_without_a_sensor_the_pause_still_holds():
+    """Sensor dial off: exactly the old behaviour, grace hold and all."""
+    m = sensor_mapper(enabled=False)
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    out = pause(m, t, 3.0)[-1][1]
+    assert out.movement_scale > 0.9, out.movement_scale
+    assert not out.from_sensor
+
+
+def test_a_disconnected_sensor_changes_nothing():
+    m = sensor_mapper()
+    crank = Crank(m, connected=False)
+    t, _, _ = stop_sequence(m, crank)
+    out = pause(m, t, 3.0)[-1][1]
+    assert out.movement_scale > 0.9
+    assert not out.from_sensor
+    assert out.crank_rpm is None
+
+
+def test_stopping_drops_to_the_floor_with_no_hold():
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    for _, out in pause(m, t, 4.0):
+        assert out.movement_scale == 0.5, out.movement_scale
+        assert out.forced == 0.0
+        assert out.from_sensor
+
+
+def test_the_freeze_is_cut_short_once_the_sensor_agrees():
+    """Console repeats 60 rpm / 70 W for 2s; distance and the sensor both say
+    stopped. The stop lands inside the freeze instead of after it."""
+    m = sensor_mapper()
+    crank = Crank(m)
+    crank.turns(-1.0, 5.0)
+    _, t, d = ride(m, 5.0)
+    trace, _ = hold(m, 2.0, t, 60.0, 70.0, d)
+    early = [out.movement_scale for dt, out in trace if dt < 0.5]
+    late = [out.movement_scale for dt, out in trace if dt > 1.6]
+    assert all(s > 0.9 for s in early), early
+    assert late and all(s == 0.5 for s in late), late
+
+
+def test_a_sensor_that_still_sees_turns_does_not_cut_the_freeze():
+    """Sensor turning, distance stalled: one witness is not enough."""
+    m = sensor_mapper()
+    crank = Crank(m)
+    crank.turns(-1.0, 7.0)
+    _, t, d = ride(m, 5.0)
+    trace, _ = hold(m, 2.0, t, 60.0, 70.0, d)
+    assert all(out.movement_scale > 0.9 for _, out in trace)
+
+
+def test_pedalling_through_the_pause_keeps_you_moving():
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    # Resume 0.5s into the pause at the same cadence.
+    crank.turns(t - 0.5, t + 5.0)
+    trace = pause(m, t, 4.5)
+    later = [out for dt, out in trace if dt > 2.0]
+    assert later
+    for out in later:
+        assert out.from_sensor
+        assert out.forced > 0.9, out.forced
+        assert abs(out.power - 70.0) < 3, out.power      # estimated, not 0
+        assert abs(out.crank_rpm - 60) < 1
+
+
+def test_effort_estimate_scales_with_sensor_cadence():
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.turns(t - 0.5, t + 5.0, rpm=30.0)
+    out = pause(m, t, 4.5)[-1][1]
+    assert abs(out.power - 35.0) < 3, out.power
+    assert abs(out.movement_scale - (0.5 + 0.5 * 35 / 75)) < 0.03
+
+
+def test_turns_from_before_the_pause_do_not_restart_you():
+    """The sensor's hold outlives the last revolution by up to 3s. Turns from
+    BEFORE the pause must not walk a rider who stopped during the freeze."""
+    m = sensor_mapper()
+    crank = Crank(m)
+    crank.turns(-1.0, 5.0, rpm=30.0)        # slow: long hold
+    _, t, d = ride(m, 5.0)
+    _, t = hold(m, 1.2, t, 60.0, 70.0, d)   # a short freeze
+    out = pause(m, t, 1.0)[0][1]
+    assert m.crank.turning(t)               # the sensor alone would say yes
+    assert out.forced == 0.0
+    assert out.movement_scale == 0.5
+
+
+def test_first_turn_after_a_rest_forces_movement_at_the_held_scale():
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    # A long gap, then one revolution: turning, rate unknown.
+    crank.revs += 1
+    crank.ticks += 3 * 1024
+    m.crank.submit(CrankReading(crank.revs, crank.ticks), now=t + 3.0)
+    out = pause(m, t + 3.0, 0.2)[0][1]
+    assert m.crank.rpm(t + 3.0) is None
+    assert out.forced > 0.9
+    assert out.movement_scale > 0.9         # the last earned scale
+
+
+def test_sprint_follows_the_estimate_through_the_pause():
+    m = sensor_mapper(sprint_at=60.0)
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.turns(t - 0.5, t + 5.0, rpm=60.0)
+    assert pause(m, t, 4.0)[-1][1].sprint
+
+
+def test_cadence_scaled_movement_uses_the_sensor_rpm():
+    m = sensor_mapper(source="cadence")
+    m.config.movement.max_value = 90.0
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.turns(t - 0.5, t + 5.0, rpm=45.0)
+    out = pause(m, t, 4.0)[-1][1]
+    assert abs(out.movement_scale - 0.75) < 0.02, out.movement_scale
+
+
+def test_a_dead_console_is_not_overruled_by_the_sensor():
+    """Silence is the console's fault path and stays the floor: the sensor
+    stands in for a console that is pausing, not one that is gone."""
+    m = sensor_mapper()
+    crank = Crank(m)
+    crank.turns(-1.0, 30.0)
+    ride(m, 5.0)
+    out = m.evaluate(now=30.0)
+    assert out.degraded
+    assert out.movement_scale == 0.5
+    assert out.forced == 0.0
+
+
+def test_the_sensor_never_forces_movement_with_that_mode_off():
+    """The sensor is evidence for "pedalling forces movement", not a switch for
+    it. With the mode off it only sets the scale on the physical stick."""
+    m = sensor_mapper()
+    m.config.forced_movement.enabled = False
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.turns(t - 0.5, t + 5.0)
+    for _, out in pause(m, t, 4.5):
+        assert out.forced == 0.0
+    assert out.from_sensor and out.movement_scale > 0.9
+    # And the switch is live in both directions.
+    m.config.forced_movement.enabled = True
+    assert pause(m, t + 4.5, 0.5)[-1][1].forced > 0.9
+
+
+def test_switching_the_sensor_off_mid_pause_restores_the_hold():
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    assert pause(m, t, 1.0)[-1][1].movement_scale == 0.5
+    m.config.crank_sensor.enabled = False
+    assert pause(m, t + 1.0, 1.0)[-1][1].movement_scale > 0.9
 
 
 if __name__ == "__main__":

@@ -121,6 +121,7 @@ EXPECTED_BOUNDS = {
     "RUMBLE_PASSTHROUGH": (0, 1),
     "RIDE_LOG": (0, 1),
     "PEDAL_FORCES_MOVEMENT": (0, 1),
+    "CADENCE_SENSOR": (0, 1),
 }
 
 

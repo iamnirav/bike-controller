@@ -353,12 +353,73 @@ A console with no distance field never forces movement.
 so distance picks up straight away and you move straight away, which is the case
 this mode is for. A longer stop runs into the console's pause, which discards
 pedalling. The bike cannot walk you again until the pause ends, up to ~4.5s later.
-The physical stick still walks you at the floor meanwhile.
+The physical stick still walks you at the floor meanwhile. A
+[cadence sensor](#a-cadence-sensor-for-the-pause) removes this cost: it sees
+you pedalling through the pause and forces movement again within a revolution
+or two.
 
 Expect trouble in menus that the left stick scrolls: pedalling there holds "up".
 Stop pedalling, or switch the mode off, for those. The ~1s release has not been
 checked against coast-down on a real ride: the flywheel may tick distance on
 briefly after your feet stop.
+
+### A cadence sensor for the pause
+
+The console's stop sequence costs about 7 seconds of not knowing. It repeats
+your last numbers for ~2s, then reports zeros for ~5s and throws away anything
+you pedal in that window. Nothing it sends follows the cranks, and nothing we
+can send it cuts the window short. `tools/idle_probe.py` and its commits record
+those experiments. So the bridge has to guess: `--movement-grace` holds your
+last speed through the pause, which is right if you are pedalling through it
+and wrong if you stopped.
+
+A crank-arm **Bluetooth cadence sensor** replaces the guess. It is any sensor
+speaking the standard cycling speed/cadence profile, such as Wahoo RPM, Garmin
+Cadence 2, Magene S3+ or Moofit. The console doesn't control it, so it keeps
+reporting through the pause:
+
+| | Without the sensor | With the sensor |
+|---|---|---|
+| You stop | your old speed for ~2s, then held ~5s more | the floor within ~1.5s (the sensor's hold is 1.5–3s; distance stalls in ~1s) |
+| You pedal through the pause | held at your old speed; forced movement stops | speed follows the sensor; forced movement keeps going |
+| Sensor off, missing or dropped | — | exactly the behaviour without it |
+
+Turn it on with `CADENCE_SENSOR=1`, `--cadence-sensor`, or the switch on the
+config page. It's live, and turning it off releases the sensor for other apps.
+The bridge connects to the nearest cadence sensor it finds. Pin one with
+`CADENCE_SENSOR_ADDRESS` if more than one is in range. Speed sensors, and
+dual-mode sensors in speed mode, are recognised and skipped.
+
+How it decides:
+
+- **During the pause** it acts only on a revolution seen *since the pause
+  began*. The sensor's "still turning" outlasts your last revolution by a
+  second or more, and without that rule a rider who stopped during the freeze
+  would walk again for a moment.
+- **During the freeze** it calls a stop only when the sensor sees nothing *and*
+  the console's distance has stalled. One witness alone is too easy to fool.
+- **Effort during the pause** is your last live watts scaled by the sensor's
+  cadence. The console's power is roughly linear in cadence at a fixed
+  resistance, but with an offset, so this over-reads somewhat if you resume much
+  slower than you stopped. It only has to last until the console comes back.
+  With `--movement cadence` the sensor's rpm is used directly.
+- **The first revolution after a rest** proves you are pedalling but not how
+  fast, because one revolution is not a rate. Until the second one, movement
+  holds your last earned speed.
+- **A dead console link** is still the console's fault path: the floor. The
+  sensor stands in for a console that is pausing, not one that has gone.
+
+**Not yet measured on real hardware:** how quickly a sensor reports the first
+revolution after a rest. These sensors notify about once a second and may doze
+when idle, so expect somewhere between one and two seconds. That is still well
+under the five-second pause. Check yours with `tools/crank_probe.py`. The ride
+log records the sensor's cadence and when it drove movement (`crank_rpm`,
+`from_sensor`), so a ride shows the real numbers. Two Bluetooth links on the
+Pi's one radio might also cost bike telemetry rate. Compare the Hz on the live
+page with the sensor on and off.
+
+Most of these sensors accept one Bluetooth connection at a time, so a phone
+app holding the sensor locks the bridge out.
 
 ### Why the lower bound is 0
 
@@ -524,6 +585,8 @@ them live and writes them back to `config.env`.
 | `--config-file` | `./config.env` | where the page persists dial changes |
 | `--frozen-after` | 4 | seconds of identical telemetry before the console counts as frozen and its held buttons are released; 0 disables |
 | `--pedal-forces-movement` | off | pedalling pushes the left stick forward; see [Pedalling forces movement](#pedalling-forces-movement) |
+| `--cadence-sensor` | off | use a Bluetooth crank cadence sensor through the console's pause; see [A cadence sensor for the pause](#a-cadence-sensor-for-the-pause) |
+| `--cadence-sensor-address` | nearest | which sensor, when more than one is in range |
 | `--sprint-at` | — | hold the sprint button at/above this effort |
 | `--sprint-button` | `BTN_THUMBL` | button held when sprinting (left stick click) |
 | `--button RPM:BTN` | — | hold a button above an rpm threshold; repeatable, e.g. `--button 80:BTN_TR` |
@@ -611,6 +674,7 @@ another ride.
 | `MOVEMENT_MIN` | yes | effort at which movement starts |
 | `MOVEMENT_FLOOR` | yes | baseline multiplier at any effort including none |
 | `PEDAL_FORCES_MOVEMENT` | yes | pedalling pushes the left stick forward |
+| `CADENCE_SENSOR` | yes | use a Bluetooth crank cadence sensor through the console's pause |
 | `SPRINT_AT` | yes | effort holding the sprint button; can be switched off |
 | `FROZEN_AFTER` | yes | freeze-guard window; 0 disables |
 | `POLL_INTERVAL` | restart | BLE poll spacing |
@@ -715,6 +779,7 @@ trusting it.
 | `tools/scan.py` | find the bike; flags anything advertising FTMS, CSC or the iFit service |
 | `tools/probe_bike.py` | handshake + poll + decode; prints a **per-byte movement table** so you can see which byte tracks your legs |
 | `tools/live.py` | live cadence/power/resistance readout with an Hz counter |
+| `tools/crank_probe.py` | find a Bluetooth cadence sensor and watch its revolutions live; `--list` to see every sensor in range |
 | `tools/inspect_controller.py` | list controllers, check for standard codes and axis ranges; `--watch` live-dumps events |
 | `tools/test_gamepad.py` | create a virtual pad and verify the kernel/udev requirements |
 | `tools/bridge.py` | the bridge |

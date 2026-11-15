@@ -131,6 +131,17 @@ DIALS: tuple[Dial, ...] = (
              "meanwhile. Turn off in menus that scroll with the stick.",
     ),
     Dial(
+        key="CADENCE_SENSOR", arg="cadence_sensor",
+        label="Cadence sensor", kind="bool",
+        minimum=0, maximum=1, step=1,
+        path="crank_sensor.enabled",
+        help="Use a Bluetooth crank cadence sensor to see through the "
+             "console's pause. Stop pedalling and you drop to the floor at "
+             "once, with no hold; pedal through the pause and you keep moving. "
+             "With no sensor connected nothing changes. Turning this off "
+             "releases the sensor for other apps.",
+    ),
+    Dial(
         key="SPRINT_AT", arg="sprint_at", label="Sprint at", kind="float",
         minimum=20.0, maximum=600.0, step=5.0, unit="W",
         path="movement.sprint_at", nullable=True,
