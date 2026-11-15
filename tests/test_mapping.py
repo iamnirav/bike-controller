@@ -1158,6 +1158,22 @@ def test_a_dead_console_is_not_overruled_by_the_sensor():
     assert out.forced == 0.0
 
 
+def test_the_sensor_never_forces_movement_with_that_mode_off():
+    """The sensor is evidence for "pedalling forces movement", not a switch for
+    it. With the mode off it only sets the scale on the physical stick."""
+    m = sensor_mapper()
+    m.config.forced_movement.enabled = False
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.turns(t - 0.5, t + 5.0)
+    for _, out in pause(m, t, 4.5):
+        assert out.forced == 0.0
+    assert out.from_sensor and out.movement_scale > 0.9
+    # And the switch is live in both directions.
+    m.config.forced_movement.enabled = True
+    assert pause(m, t + 4.5, 0.5)[-1][1].forced > 0.9
+
+
 def test_switching_the_sensor_off_mid_pause_restores_the_hold():
     m = sensor_mapper()
     crank = Crank(m)
