@@ -41,6 +41,12 @@ FIELDS = [
     "movement_scale",   # what the left stick was actually multiplied by
     "sprint",
     "gate_open",
+    # The crank sensor, when one is connected: its cadence (blank when there
+    # is no sensor or the rate is not yet known) and whether it, rather than
+    # the console, drove movement on this row. Logged so the sensor's restart
+    # latency can be read against the console's pause after a real ride.
+    "crank_rpm",
+    "from_sensor",
 ]
 
 
@@ -116,6 +122,9 @@ class RideLogger:
                 f"{status.move:.3f}",
                 int(status.sprint),
                 int(status.gate),
+                ("" if getattr(status, "crank_rpm", None) is None
+                 else f"{status.crank_rpm:.1f}"),
+                int(getattr(status, "from_sensor", False)),
             ])
             self.rows += 1
             # Flushed per row: a ride ends with a power cut or a Ctrl-C far more

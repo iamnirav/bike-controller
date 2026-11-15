@@ -640,6 +640,7 @@ class ConfigServer:
                 "sprint_release": (None if sprint_at is None
                                    else sprint_at * movement.sprint_release_ratio),
                 "forced_movement": self.config.forced_movement.enabled,
+                "crank_sensor": self.config.crank_sensor.enabled,
                 "stale_after": self.config.stale_after,
             },
         }
@@ -660,6 +661,12 @@ class ConfigServer:
             "sprint": getattr(status, "sprint", False),
             "frozen": getattr(status, "frozen", False),
             "forced": getattr(status, "forced", False),
+            "crank": getattr(status, "crank", "off"),
+            "crank_name": getattr(status, "crank_name", ""),
+            "crank_rpm": (None if getattr(status, "crank_rpm", None) is None
+                          else round(status.crank_rpm, 1)),
+            "crank_turning": getattr(status, "crank_turning", False),
+            "from_sensor": getattr(status, "from_sensor", False),
             "hz": round(getattr(status, "hz", 0.0), 2),
             "frames": getattr(status, "frames", 0),
             "uptime": round(time.monotonic() - self.started_at),

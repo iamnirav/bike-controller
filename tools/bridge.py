@@ -52,6 +52,7 @@ from bike_controller.watchdog import Watchdog                  # noqa: E402
 from bike_controller.mapping import (                                # noqa: E402
     AxisConfig,
     ButtonRule,
+    CrankSensorConfig,
     GateConfig,
     Mapper,
     MappingConfig,
@@ -97,6 +98,13 @@ class Status:
     resistance: int = 0                 # raw byte, not the console's displayed level
     frozen: bool = False                # console repeating one reading
     forced: bool = False                # bike is pushing the stick forward
+    # The crank sensor: off / searching / connecting / connected / retrying /
+    # "no crank data" (a speed sensor, or a dual-mode one in speed mode).
+    crank: str = "off"
+    crank_name: str = ""
+    crank_rpm: float | None = None      # None: not connected, or rate unknown
+    crank_turning: bool = False
+    from_sensor: bool = False           # sensor stood in for the console
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -384,7 +392,11 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
     backoff = 3.0
     while True:
         try:
-            target = address or await IconBike.discover()
+            if address:
+                target = address
+            else:
+                async with ble_scan_lock():
+                    target = await IconBike.discover()
             if target is None:
                 status.bike = "searching"
                 await asyncio.sleep(backoff)
@@ -425,6 +437,84 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                   f"retrying in {backoff:.0f}s", flush=True)
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 1.5)
+
+
+# One scan at a time across the bike and the sensor. Two discovery sessions on
+# one BlueZ adapter can refuse each other ("operation already in progress"), and
+# both feeds scan whenever their device is missing -- which at boot is both.
+_BLE_SCAN_LOCK: asyncio.Lock | None = None
+
+
+def ble_scan_lock() -> asyncio.Lock:
+    global _BLE_SCAN_LOCK
+    if _BLE_SCAN_LOCK is None:
+        _BLE_SCAN_LOCK = asyncio.Lock()
+    return _BLE_SCAN_LOCK
+
+
+async def feed_from_crank(address: str | None, mapper: Mapper,
+                          status: Status) -> None:
+    """Keep a crank cadence sensor connected while its dial is on.
+
+    Like feed_from_bike this never gives up, and it also follows the dial: off
+    means disconnected, so a phone app can have the sensor back without a
+    restart. Every failure lands on mapper.crank.link_down(), and a sensor that
+    is not connected changes nothing in the mapping -- so the worst this task
+    can do is fail to help.
+    """
+    from bike_controller.cadence_sensor import CadenceSensor, NoCrankData, scan
+
+    crank = mapper.crank
+    enabled = lambda: mapper.config.crank_sensor.enabled      # noqa: E731
+    # Speed sensors found during discovery, skipped for the rest of the run so
+    # one that sits nearer than the cadence sensor cannot starve it.
+    not_cadence: set[str] = set()
+    backoff = 3.0
+    while True:
+        if not enabled():
+            status.crank, status.crank_name = "off", ""
+            await asyncio.sleep(1.0)
+            continue
+        target = address
+        try:
+            if target is None:
+                status.crank = "searching"
+                async with ble_scan_lock():
+                    found = [f for f in await scan(8.0)
+                             if f.address not in not_cadence]
+                if not found:
+                    await asyncio.sleep(backoff)
+                    continue
+                target = found[0].address
+            status.crank = "connecting"
+            async with CadenceSensor(target) as sensor:
+                crank.link_up()
+                status.crank, status.crank_name = "connected", sensor.name
+                print(f"  cadence sensor connected: {sensor.name} ({target})",
+                      flush=True)
+                backoff = 3.0
+                async for item in sensor.stream(idle_timeout=1.0):
+                    if not enabled():
+                        break
+                    if item is not None:
+                        at, reading = item
+                        crank.submit(reading, at)
+        except asyncio.CancelledError:
+            raise
+        except NoCrankData as exc:
+            status.crank = "no crank data"
+            print(f"  cadence sensor skipped: {exc}", flush=True)
+            if target is not None and address is None:
+                not_cadence.add(target)
+            await asyncio.sleep(backoff)
+        except Exception as exc:                                 # noqa: BLE001
+            status.crank = "retrying"
+            print(f"  cadence sensor down ({type(exc).__name__}: {exc}); "
+                  f"retrying in {backoff:.0f}s", flush=True)
+            await asyncio.sleep(backoff)
+            backoff = min(30.0, backoff * 1.5)
+        finally:
+            crank.link_down()
 
 
 class _SimSample:
@@ -561,6 +651,9 @@ async def output_loop(
         status.frozen = mapper.is_frozen(now)
         status.sprint = out.sprint
         status.forced = out.forced > 0
+        status.crank_rpm = out.crank_rpm
+        status.crank_turning = mapper.crank.turning(now)
+        status.from_sensor = out.from_sensor
         # Take power from the same evaluate() that produced `move`, not from the
         # feed task -- otherwise the two can be a sample apart and the status
         # line implies a relationship between them that isn't real.
@@ -694,7 +787,11 @@ async def status_loop(status: Status, stop: asyncio.Event,
             f"pwr={status.power:4.0f} res={status.resistance:2d} "
             f"move={status.move:4.2f}"
             f"{' SPRINT' if status.sprint else ''}"
-            f"{' FORCED' if status.forced else ''}",
+            f"{' FORCED' if status.forced else ''}"
+            + (f" crank={status.crank}"
+               + (f" {status.crank_rpm:.0f}rpm" if status.crank_rpm else "")
+               + (" SENSOR" if status.from_sensor else "")
+               if status.crank != "off" else ""),
             flush=True,
         )
 
@@ -744,6 +841,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "and stop when you stop. Moving the physical "
                              "stick takes over. Live-switchable from the web "
                              "page.")
+    parser.add_argument("--cadence-sensor", action="store_true",
+                        help="use a Bluetooth crank cadence sensor to see "
+                             "through the console's pause: stop and you stop, "
+                             "pedal through it and you keep moving. Live-"
+                             "switchable from the web page.")
+    parser.add_argument("--cadence-sensor-address", default=None,
+                        help="sensor to use; default is the nearest one found")
     parser.add_argument("--sprint-at", type=float, default=None,
                         help="hold the sprint button at/above this effort")
     parser.add_argument("--sprint-button", default="BTN_THUMBL",
@@ -874,6 +978,7 @@ def build_settings(args, parser: argparse.ArgumentParser) -> Settings:
         ),
         movement=movement,
         forced_movement=ForcedMovementConfig(enabled=args.pedal_forces_movement),
+        crank_sensor=CrankSensorConfig(enabled=args.cadence_sensor),
         buttons=args.button,
         # Derived, never hand-set: a fixed window silently stops matching
         # the telemetry rate the moment --poll-interval changes.
@@ -957,6 +1062,10 @@ def print_banner(args, settings: Settings, launcher: "Launcher",
           f"{mapper.tracker.stale_after:.2f}s without telemetry")
     print(f"Freeze guard: "
           f"{f'{args.frozen_after:.1f}s' if args.frozen_after > 0 else 'off'}")
+    sensor = ("off (switchable from the web page)"
+              if not config.crank_sensor.enabled else
+              f"on, {args.cadence_sensor_address or 'nearest found'}")
+    print(f"Cadence sensor: {sensor}")
     print(f"Ride log: {args.ride_log or 'off'}")
     print(f"Watchdog: {'supervised' if watchdog.active else 'not supervised'}")
     print(f"Cadence axis: {args.axis}")
@@ -1071,6 +1180,10 @@ async def main() -> int:
             tasks.append(asyncio.create_task(
                 feed_from_bike(args.address, mapper, status,
                                args.poll_interval)))
+            # Always running, idle while the dial is off, so turning it on from
+            # the web page needs no restart.
+            tasks.append(asyncio.create_task(
+                feed_from_crank(args.cadence_sensor_address, mapper, status)))
         if not args.no_controller:
             tasks.append(asyncio.create_task(
                 feed_from_controller(holder, status, args.controller,

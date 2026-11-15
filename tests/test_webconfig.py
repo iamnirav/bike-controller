@@ -227,6 +227,22 @@ def test_live_reports_running_thresholds():
     serve(body, config)
 
 
+def test_live_reports_the_cadence_sensor():
+    config = MappingConfig()
+
+    async def body(port, _server):
+        live = json.loads((await _request(port, "GET", "/api/live"))[1])
+        assert live["thresholds"]["crank_sensor"] is False
+        assert live["status"]["crank"] == "off"
+        assert live["status"]["crank_rpm"] is None
+        # Following the dial, like every other threshold.
+        config.crank_sensor.enabled = True
+        live = json.loads((await _request(port, "GET", "/api/live"))[1])
+        assert live["thresholds"]["crank_sensor"] is True
+
+    serve(body, config)
+
+
 def test_live_says_none_when_movement_scaling_is_off():
     async def body(port, _server):
         _, payload = await _request(port, "GET", "/api/live")

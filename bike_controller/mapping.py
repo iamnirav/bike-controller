@@ -26,6 +26,8 @@ import time
 from typing import Literal
 from dataclasses import dataclass, field
 
+from bike_controller.csc import CrankTracker
+
 
 @dataclass
 class CadenceTracker:
@@ -223,6 +225,31 @@ class ForcedMovementConfig:
 
 
 @dataclass
+class CrankSensorConfig:
+    """A Bluetooth crank cadence sensor as a second witness to pedalling.
+
+    The console lies twice every time you stop: for ~2s it repeats your last
+    cadence and power (the freeze), then for ~5s it reports zeros and discards
+    anything you pedal (the pause). Without another source, the bridge can only
+    guess through both -- which is what MovementConfig.blackout_grace does.
+
+    With a sensor connected and this on, it stops guessing:
+
+      - Pause, sensor sees no turns: you stopped. Straight to the floor, no hold.
+      - Pause, sensor sees turns: you are pedalling through it. Movement,
+        sprint and forced movement follow an effort estimated from the sensor.
+      - Freeze, sensor sees no turns and distance has stalled: you stopped.
+        The floor at once, rather than two more seconds of your old speed.
+
+    Everything else -- live telemetry, a dead console link -- is the console's
+    call as before. A sensor that is off, missing or disconnected changes
+    nothing at all: the grace hold comes back as the fallback.
+    """
+
+    enabled: bool = False
+
+
+@dataclass
 class ButtonRule:
     """Holds a button while cadence is at or above min_rpm."""
 
@@ -261,6 +288,7 @@ class MappingConfig:
     movement: MovementConfig = field(default_factory=MovementConfig)
     forced_movement: ForcedMovementConfig = field(
         default_factory=ForcedMovementConfig)
+    crank_sensor: CrankSensorConfig = field(default_factory=CrankSensorConfig)
     buttons: list[ButtonRule] = field(default_factory=list)
     # None keeps CadenceTracker's default; set it from stale_after_for().
     stale_after: float | None = None
@@ -298,6 +326,13 @@ class MappingOutput:
     # Forward deflection, 0.0-1.0, to push on the left stick while the physical
     # stick is centred. 0.0 whenever the mode is off or you are not pedalling.
     forced: float = 0.0
+    # The crank sensor decided this frame: the console was paused or frozen and
+    # the sensor's evidence replaced the guess. `power` is then an ESTIMATE
+    # (or the sensor's cadence, for a cadence-scaled setup).
+    from_sensor: bool = False
+    # Sensor cadence: None when the sensor is off or not connected, or when it
+    # has seen a turn but cannot yet say how fast.
+    crank_rpm: float | None = None
 
 
 # How far the physical stick must move, as a fraction of full deflection, before
@@ -347,6 +382,19 @@ class Mapper:
         # Evidence of pedalling for forced movement: when distance last moved.
         self._distance: int | None = None
         self._distance_advanced_at: float | None = None
+        # The crank sensor, fed by the bridge's sensor task. Always present so
+        # callers need no None checks; it reports nothing until connected.
+        self.crank = CrankTracker()
+        # When the console's current run of all-zero readings began. Unlike
+        # _blackout_since this is kept whether or not movement is enabled,
+        # because forced movement needs it too.
+        self._zeros_since: float | None = None
+        # The last live (cadence, power) pair, the reference for estimating
+        # power from the sensor's cadence during a pause.
+        self._live_ref: tuple[float, float] | None = None
+        # Set by _movement() each frame, read by evaluate().
+        self._from_sensor = False
+        self._effort = 0.0
 
     def submit(self, cadence_rpm: float, power_w: float = 0.0,
                now: float | None = None, distance: float | None = None) -> None:
@@ -381,13 +429,84 @@ class Mapper:
             self._distance_advanced_at = now
         self._distance = distance
 
+        if cadence_rpm <= 0 and power_w <= 0:
+            if self._zeros_since is None:
+                self._zeros_since = now
+        else:
+            self._zeros_since = None
+            if cadence_rpm > 0 and power_w > 0:
+                self._live_ref = (cadence_rpm, power_w)
+
         self.tracker.submit(cadence_rpm, now)
 
+    # --- The crank sensor ---------------------------------------------------
+
+    def _sensor_live(self) -> bool:
+        return self.config.crank_sensor.enabled and self.crank.connected
+
+    def _console_paused(self, now: float) -> bool:
+        """Live frames, all zeros: the console's pause (or an idle bike)."""
+        return self._zeros_since is not None and not self.tracker.is_stale(now)
+
+    def _sensor_pedalling_through_pause(self, now: float) -> bool:
+        """The sensor saw a turn SINCE the pause began.
+
+        Since, not merely recently: the sensor holds "turning" for up to a few
+        seconds after the last revolution, which would otherwise carry the
+        rider's stop across the freeze into the pause and walk them again for a
+        moment after they had already stopped.
+        """
+        if not (self._sensor_live() and self._console_paused(now)):
+            return False
+        turned = self.crank.last_turn_at
+        return (turned is not None and turned >= self._zeros_since
+                and self.crank.turning(now))
+
+    def _sensor_says_stopped_in_freeze(self, now: float) -> bool:
+        """Console still reporting effort, but nothing is turning.
+
+        Needs both witnesses: distance stalled (the console's own tell for the
+        freeze) AND the sensor seeing no turns. Either alone is too weak -- a
+        sensor can miss a notification, and distance needs a console that
+        reports it.
+        """
+        if not self._sensor_live() or not self._have_distance:
+            return False
+        if self._zeros_since is not None or self.tracker.is_stale(now):
+            return False
+        if self.crank.turning(now):
+            return False
+        release = self.config.forced_movement.release_after
+        return (self._distance_advanced_at is None
+                or now - self._distance_advanced_at > release)
+
+    def _sensor_effort(self, now: float) -> float | None:
+        """Effort in the movement source's units, from the sensor's cadence.
+
+        Power is estimated by scaling the last live reading: watts per rpm at
+        the resistance you were just riding. The console's own power is close to
+        linear in cadence at a fixed resistance but with an offset, so this
+        over-reads somewhat when you resume much slower than you stopped. It
+        only has to last the few seconds until the console returns.
+        """
+        rpm = self.crank.rpm(now)
+        if rpm is None:
+            return None
+        if self.config.movement.source == "cadence":
+            return rpm
+        if self._live_ref is None:
+            return None
+        ref_cadence, ref_power = self._live_ref
+        return ref_power * rpm / ref_cadence
+
     def is_pedalling(self, now: float | None = None) -> bool:
-        """True while the distance accumulator is still climbing."""
+        """True while the distance accumulator is still climbing -- or, during
+        the console's pause, while the crank sensor sees the crank turning."""
+        now = time.monotonic() if now is None else now
+        if self._sensor_pedalling_through_pause(now):
+            return True
         if self._distance_advanced_at is None or self.tracker.is_stale(now):
             return False
-        now = time.monotonic() if now is None else now
         release = self.config.forced_movement.release_after
         return now - self._distance_advanced_at <= release
 
@@ -416,6 +535,8 @@ class Mapper:
 
     def _movement(self, stale: bool, now: float) -> tuple[float, bool, bool]:
         """Return (scale, sprint, at_max). Raw and unsmoothed by design."""
+        self._from_sensor = False
+        self._effort = self._power_raw
         movement = self.config.movement
         if not movement.enabled:
             return 1.0, False, False
@@ -449,6 +570,31 @@ class Mapper:
         else:
             if self._blackout_since is None:
                 self._blackout_since = now
+
+        # The crank sensor, when there is one, replaces the guesses below.
+        if self._sensor_says_stopped_in_freeze(now) or (
+                blacked_out and self._sensor_live()
+                and not self._sensor_pedalling_through_pause(now)):
+            # Stopped, and the sensor proves it: the floor, now.
+            self._from_sensor = True
+            self._effort = 0.0
+            self._sprinting = False
+            self._at_max = False
+            return movement.floor, False, False
+        sensed = None
+        if blacked_out and self._sensor_pedalling_through_pause(now):
+            sensed = self._sensor_effort(now)
+            self._from_sensor = True
+            if sensed is None:
+                # Turning, rate not measured yet (the first revolution after a
+                # rest). Pedalling is proven, effort is not: hold what was last
+                # earned, or the floor if nothing ever was.
+                self._sprinting = False
+                held = self._last_live_scale
+                return (movement.floor if held is None else held), False, False
+            self._effort = sensed
+
+        if blacked_out and sensed is None:
             if (movement.blackout_grace > 0
                     and self._last_live_scale is not None
                     and now - self._blackout_since < movement.blackout_grace):
@@ -459,7 +605,11 @@ class Mapper:
                 self._sprinting = False
                 return self._last_live_scale, False, self._at_max
 
-        value = self._power_raw if movement.source == "power" else self._cadence_raw
+        if sensed is not None:
+            value = sensed
+        else:
+            value = (self._power_raw if movement.source == "power"
+                     else self._cadence_raw)
 
         span = max(1e-6, movement.max_value - movement.min_value)
         fraction = (value - movement.min_value) / span
@@ -487,8 +637,11 @@ class Mapper:
         # Recorded after the blackout test, so it only ever holds a scale
         # computed from telemetry the console actually stood behind. During the
         # ~2s freeze the console repeats its last live reading, so this captures
-        # that -- which is exactly the value worth holding.
-        self._last_live_scale = scale
+        # that -- which is exactly the value worth holding. An estimate from
+        # the sensor is not recorded: the hold is for what the console stood
+        # behind.
+        if sensed is None:
+            self._last_live_scale = scale
         return scale, self._sprinting, self._at_max
 
     def _update_gate(self, cadence: float, now: float, stale: bool) -> bool:
@@ -548,8 +701,15 @@ class Mapper:
         # part.
         stale = self.tracker.is_stale(now)
         out.gate_open = self._update_gate(cadence, now, stale)
-        out.power = self._power_raw
         out.movement_scale, out.sprint, out.at_max = self._movement(stale, now)
+        out.from_sensor = self._from_sensor
+        # The estimate while the sensor is standing in for the console, so the
+        # gauge shows the effort that is actually driving movement.
+        out.power = (self._effort if self._from_sensor
+                     and self.config.movement.source == "power"
+                     else self._power_raw)
+        if self._sensor_live():
+            out.crank_rpm = self.crank.rpm(now)
         # Silence still counts as degraded, which buzzes the controller. A latch
         # does not: it is logged and left alone, because a buzz mid-firefight is
         # a worse interruption than the fault it announces.

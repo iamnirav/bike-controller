@@ -1,0 +1,165 @@
+"""Tests for the cadence-sensor decoding and crank bookkeeping.
+
+Runs with pytest, or standalone:  python3 tests/test_csc.py
+"""
+
+import os
+import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from bike_controller.csc import (      # noqa: E402
+    CrankReading,
+    CrankTracker,
+    parse_measurement,
+    supports_crank,
+)
+
+
+def crank_frame(revs, ticks):
+    return bytes([0x02]) + struct.pack("<HH", revs & 0xFFFF, ticks & 0xFFFF)
+
+
+def test_parses_crank_only_frame():
+    assert parse_measurement(crank_frame(12, 3000)) == CrankReading(12, 3000)
+
+
+def test_parses_crank_after_wheel_data():
+    frame = bytes([0x03]) + struct.pack("<IH", 999, 5) + struct.pack("<HH", 7, 2048)
+    assert parse_measurement(frame) == CrankReading(7, 2048)
+
+
+def test_wheel_only_frame_has_no_crank_reading():
+    frame = bytes([0x01]) + struct.pack("<IH", 999, 5)
+    assert parse_measurement(frame) is None
+
+
+def test_truncated_frame_is_refused():
+    for bad in (b"", bytes([0x02, 1, 0])):
+        try:
+            parse_measurement(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+
+
+def test_feature_bits():
+    assert supports_crank(struct.pack("<H", 0x02))
+    assert supports_crank(struct.pack("<H", 0x03))
+    assert not supports_crank(struct.pack("<H", 0x01))
+    assert not supports_crank(b"")
+
+
+def pedal(tracker, rpm, seconds, t0=0.0, revs0=0, ticks0=0, notify_hz=1.0):
+    """Turn the crank at `rpm`, with the sensor notifying at `notify_hz`.
+
+    Returns (t, revs, ticks) at the end, for chaining.
+    """
+    period = 60.0 / rpm
+    t, revs, ticks = t0, revs0, ticks0
+    next_turn = t0 + period
+    while t < t0 + seconds:
+        t += 1.0 / notify_hz
+        while next_turn <= t:
+            revs += 1
+            ticks = ticks0 + round((next_turn - t0) * 1024)
+            next_turn += period
+        tracker.submit(CrankReading(revs & 0xFFFF, ticks & 0xFFFF), now=t)
+    return t, revs, ticks
+
+
+def connected():
+    tr = CrankTracker()
+    tr.link_up()
+    return tr
+
+
+def test_first_reading_is_a_baseline_not_a_turn():
+    tr = connected()
+    assert not tr.submit(CrankReading(500, 100), now=0.0)
+    assert not tr.turning(0.0)
+
+
+def test_steady_pedalling_measures_cadence():
+    tr = connected()
+    t, _, _ = pedal(tr, 60, 6)
+    assert tr.turning(t)
+    assert abs(tr.rpm(t) - 60) < 1, tr.rpm(t)
+
+
+def test_repeated_count_is_not_a_turn():
+    tr = connected()
+    tr.submit(CrankReading(10, 1000), now=0.0)
+    assert tr.submit(CrankReading(11, 2024), now=1.0)
+    assert not tr.submit(CrankReading(11, 2024), now=2.0)
+    assert tr.last_turn_at == 1.0
+
+
+def test_stopping_ends_turning_within_the_hold():
+    tr = connected()
+    t, revs, ticks = pedal(tr, 60, 6)
+    # Sensor keeps notifying the same count.
+    for i in range(1, 6):
+        tr.submit(CrankReading(revs, ticks), now=t + i)
+    assert not tr.turning(t + 3.1)
+    assert tr.rpm(t + 3.1) == 0.0
+
+
+def test_first_turn_after_a_rest_is_turning_at_unknown_rate():
+    tr = connected()
+    t, revs, ticks = pedal(tr, 60, 6)
+    # 10s rest, then one revolution.
+    t2 = t + 10
+    assert tr.submit(CrankReading(revs + 1, ticks + 11 * 1024), now=t2)
+    assert tr.turning(t2)
+    assert tr.rpm(t2) is None
+    # The next one measures it.
+    tr.submit(CrankReading(revs + 2, ticks + 12 * 1024), now=t2 + 1)
+    assert abs(tr.rpm(t2 + 1) - 60) < 1
+
+
+def test_event_clock_wrap_after_long_rest_does_not_alias():
+    """65s later the 1/1024s clock has wrapped, so the masked interval looks
+    like one second. Our own clock must overrule it."""
+    tr = connected()
+    tr.submit(CrankReading(10, 1000), now=0.0)
+    tr.submit(CrankReading(11, 2024), now=1.0)
+    tr.submit(CrankReading(12, (2024 + 65 * 1024) & 0xFFFF), now=66.0)
+    assert tr.turning(66.0)
+    assert tr.rpm(66.0) is None
+
+
+def test_counter_wrap_is_continuous():
+    tr = connected()
+    tr.submit(CrankReading(0xFFFF, 1000), now=0.0)
+    tr.submit(CrankReading(0, 2024), now=1.0)
+    tr.submit(CrankReading(1, 3048), now=2.0)
+    assert abs(tr.rpm(2.0) - 60) < 1
+
+
+def test_implausible_jump_is_rebaselined():
+    tr = connected()
+    tr.submit(CrankReading(10, 1000), now=0.0)
+    assert not tr.submit(CrankReading(500, 2024), now=1.0)
+    assert not tr.turning(1.0)
+
+
+def test_disconnected_tracker_reports_nothing():
+    tr = connected()
+    t, _, _ = pedal(tr, 60, 5)
+    tr.link_down()
+    assert not tr.turning(t)
+    assert tr.rpm(t) == 0.0
+
+
+def test_slow_pedalling_holds_between_strokes():
+    tr = connected()
+    t, _, _ = pedal(tr, 30, 10)       # one turn every 2s
+    last = tr.last_turn_at
+    assert tr.turning(last + 2.9)
+
+
+if __name__ == "__main__":
+    from _runner import main          # noqa: E402 - script-mode only
+    main(globals())
