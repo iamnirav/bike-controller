@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import sys
 import time
 
@@ -60,6 +61,14 @@ async def main() -> int:
             return 0
         address = found[0].address
         print(f"using the nearest: {found[0].name} ({address})")
+
+    # Killed or hung up (an ssh session dropping), still disconnect: BlueZ
+    # keeps a link the process never closed, and a connected sensor stops
+    # advertising, so nothing can find it again until someone disconnects it.
+    task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(sig, task.cancel)
 
     tracker = CrankTracker()
     try:
@@ -103,5 +112,5 @@ async def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(asyncio.run(main()))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         sys.exit(0)

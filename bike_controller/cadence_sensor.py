@@ -62,6 +62,56 @@ async def scan(timeout: float = 8.0) -> list[Found]:
     return found
 
 
+async def release_stranded(also: str | None = None) -> list[str]:
+    """Disconnect cycling sensors BlueZ holds that nobody is using.
+
+    A connected sensor stops advertising, so a scan cannot find it -- and BlueZ
+    keeps an LE link up after the process that opened it has gone, if that
+    process died without disconnecting (a killed probe did exactly this, and
+    the bridge then searched for 17 minutes). Call it only when we hold no
+    sensor ourselves: anything connected then is an orphan.
+
+    Matches the CSC service, which BlueZ lists once services were resolved, or
+    `also` (a pinned address). Linux only; elsewhere returns [] untouched.
+    Returns the addresses released.
+    """
+    try:
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+    except ImportError:
+        return []
+    released = []
+    bus = None
+    try:
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        reply = await bus.call(Message(
+            destination="org.bluez", path="/",
+            interface="org.freedesktop.DBus.ObjectManager",
+            member="GetManagedObjects"))
+        if reply.message_type == MessageType.ERROR:
+            return []
+        for path, ifaces in reply.body[0].items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev or not dev.get("Connected") or not dev["Connected"].value:
+                continue
+            address = dev["Address"].value if "Address" in dev else ""
+            uuids = [u.lower() for u in dev["UUIDs"].value] if "UUIDs" in dev else []
+            if CSC_SERVICE not in uuids and not (
+                    also and address.upper() == also.upper()):
+                continue
+            await bus.call(Message(destination="org.bluez", path=path,
+                                   interface="org.bluez.Device1",
+                                   member="Disconnect"))
+            released.append(address)
+    except Exception:                                       # noqa: BLE001
+        # A cleanup, never a reason to stop looking for the sensor.
+        pass
+    finally:
+        if bus is not None:
+            bus.disconnect()
+    return released
+
+
 class CadenceSensor:
     """One connected sensor, yielding (arrival_time, CrankReading)."""
 
@@ -114,7 +164,10 @@ class CadenceSensor:
         self._put((at, reading))
 
     async def __aenter__(self) -> "CadenceSensor":
-        self._client = BleakClient(self.address, timeout=20.0,
+        # 40s, not bleak's usual 20: with the bike's link busy on the same
+        # radio, the first good connect to a Moofit CS8 took about 21s, and
+        # several 20s attempts timed out at the link layer.
+        self._client = BleakClient(self.address, timeout=40.0,
                                    disconnected_callback=self._on_disconnect)
         await self._client.__aenter__()
         try:

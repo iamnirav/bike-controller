@@ -470,7 +470,8 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
     is not connected changes nothing in the mapping -- so the worst this task
     can do is fail to help.
     """
-    from bike_controller.cadence_sensor import CadenceSensor, NoCrankData, scan
+    from bike_controller.cadence_sensor import (
+        CadenceSensor, NoCrankData, release_stranded, scan)
 
     crank = mapper.crank
     enabled = lambda: mapper.config.crank_sensor.enabled      # noqa: E731
@@ -485,6 +486,11 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
             continue
         target = address
         try:
+            # We hold no sensor here, so any the Pi has connected is an orphan
+            # that a scan cannot see. Cheap: one D-Bus round trip.
+            for orphan in await release_stranded(address):
+                print(f"  cadence sensor: released a stranded link to {orphan}",
+                      flush=True)
             if target is None:
                 status.crank = "searching"
                 async with ble_scan_lock():
