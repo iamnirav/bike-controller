@@ -403,7 +403,14 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
                 continue
 
             status.bike = "connecting"
-            async with IconBike(target, poll_interval=poll_interval) as bike:
+            async with contextlib.AsyncExitStack() as stack:
+                # Connecting by address runs a short discovery inside BlueZ,
+                # so it takes the scan lock too. Without it a sensor scan
+                # running at startup failed every bike connect with
+                # "InProgress", and the bike never came back.
+                async with ble_scan_lock():
+                    bike = await stack.enter_async_context(
+                        IconBike(target, poll_interval=poll_interval))
                 status.bike = "connected"
                 backoff = 3.0
                 stream = bike.stream()
@@ -442,6 +449,7 @@ async def feed_from_bike(address: str | None, mapper: Mapper, status: Status,
 # One scan at a time across the bike and the sensor. Two discovery sessions on
 # one BlueZ adapter can refuse each other ("operation already in progress"), and
 # both feeds scan whenever their device is missing -- which at boot is both.
+# CONNECTING counts as a scan: BlueZ discovers the address before connecting.
 _BLE_SCAN_LOCK: asyncio.Lock | None = None
 
 
@@ -487,7 +495,10 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
                     continue
                 target = found[0].address
             status.crank = "connecting"
-            async with CadenceSensor(target) as sensor:
+            async with contextlib.AsyncExitStack() as stack:
+                async with ble_scan_lock():          # see feed_from_bike
+                    sensor = await stack.enter_async_context(
+                        CadenceSensor(target))
                 crank.link_up()
                 status.crank, status.crank_name = "connected", sensor.name
                 print(f"  cadence sensor connected: {sensor.name} ({target})",
