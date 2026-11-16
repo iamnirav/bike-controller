@@ -375,6 +375,9 @@ class Mapper:
         # reports zeros, and holding a scale we never measured would serve 0.0
         # for the grace window -- worse than the floor it replaces.
         self._last_live_scale: float | None = None
+        # The effort that earned it, so the gauge can show what a hold is
+        # standing on rather than the console's zero.
+        self._last_live_effort = 0.0
         self._blackout_since: float | None = None
         self._last_reading: tuple | None = None
         self._reading_changed_at: float | None = None
@@ -591,6 +594,7 @@ class Mapper:
                 # earned, or the floor if nothing ever was.
                 self._sprinting = False
                 held = self._last_live_scale
+                self._effort = 0.0 if held is None else self._last_live_effort
                 return (movement.floor if held is None else held), False, False
             self._effort = sensed
 
@@ -642,6 +646,7 @@ class Mapper:
         # behind.
         if sensed is None:
             self._last_live_scale = scale
+            self._last_live_effort = value
         return scale, self._sprinting, self._at_max
 
     def _update_gate(self, cadence: float, now: float, stale: bool) -> bool:

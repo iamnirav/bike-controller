@@ -1051,14 +1051,19 @@ def test_stopping_drops_to_the_floor_with_no_hold():
 
 def test_the_freeze_is_cut_short_once_the_sensor_agrees():
     """Console repeats 60 rpm / 70 W for 2s; distance and the sensor both say
-    stopped. The stop lands inside the freeze instead of after it."""
+    stopped. The stop lands inside the freeze instead of after it.
+
+    Only once the sensor's hold runs out, which is a period plus a
+    notification interval: at 120 rpm that fits inside the 2s freeze, at
+    60 rpm it does not (the hold has to cover a slow rider's next stroke
+    arriving a notification late, and a stop is the cheaper error to delay)."""
     m = sensor_mapper()
     crank = Crank(m)
-    crank.turns(-1.0, 5.0)
+    crank.turns(-1.0, 5.0, rpm=120.0)
     _, t, d = ride(m, 5.0)
     trace, _ = hold(m, 2.0, t, 60.0, 70.0, d)
     early = [out.movement_scale for dt, out in trace if dt < 0.5]
-    late = [out.movement_scale for dt, out in trace if dt > 1.6]
+    late = [out.movement_scale for dt, out in trace if dt > 1.8]
     assert all(s > 0.9 for s in early), early
     assert late and all(s == 0.5 for s in late), late
 
@@ -1125,6 +1130,21 @@ def test_first_turn_after_a_rest_forces_movement_at_the_held_scale():
     assert m.crank.rpm(t + 3.0) is None
     assert out.forced > 0.9
     assert out.movement_scale > 0.9         # the last earned scale
+
+
+def test_the_gauge_shows_the_effort_a_hold_is_standing_on():
+    """While the sensor proves pedalling but not yet a rate, movement holds the
+    last earned scale -- and the gauge must show that effort, not the console's
+    zero, or the rider sees 0 W while still walking."""
+    m = sensor_mapper()
+    crank = Crank(m)
+    t, _, _ = stop_sequence(m, crank)
+    crank.revs += 1
+    crank.ticks += 3 * 1024
+    m.crank.submit(CrankReading(crank.revs, crank.ticks), now=t + 3.0)
+    out = pause(m, t + 3.0, 0.2)[0][1]
+    assert out.from_sensor
+    assert out.power == 70.0, out.power
 
 
 def test_sprint_follows_the_estimate_through_the_pause():

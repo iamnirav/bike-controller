@@ -92,14 +92,19 @@ class CrankTracker:
     # ending: 2.5s per turn is 24 rpm. The first turn after stopping spans the
     # whole stop, and reporting "6 rpm" for it would be worse than "unknown".
     MAX_PERIOD = 2.5
-    # How long "turning" survives without a new revolution: 1.5 periods, so a
-    # single late notification does not read as a stop, clamped so that a slow
-    # rider is not dropped between strokes and a stopped one is not believed
-    # for long. Notifications arrive about once a second, so the floor has to
-    # clear that interval too.
-    HOLD_PERIODS = 1.5
+    # How long "turning" survives without a new revolution. A revolution only
+    # REACHES us at the sensor's next notification, about once a second (a
+    # Moofit CS8 measured 0.99s), so two turns can arrive up to one period PLUS
+    # one notification interval apart. Holding only 1.5 periods dropped a real
+    # 50 rpm rider for half a second between strokes: turns arrived 2.0s apart
+    # against a 1.5s hold. Clamped so a stopped rider is not believed for long.
+    NOTIFY_INTERVAL = 1.0
+    HOLD_SLACK = 0.25
     MIN_HOLD = 1.5
-    MAX_HOLD = 3.0
+    MAX_HOLD = 3.5
+    # Before the rate is known (the first turn after a rest), assume nothing
+    # slower than 40 rpm: 1.5s per turn.
+    UNKNOWN_PERIOD = 1.5
     # A count that jumps by more than this between two notifications is not
     # pedalling, it is a sensor that reset or a link that was down. At 160 rpm
     # with 1 Hz notifications the honest jump is under 3.
@@ -163,10 +168,9 @@ class CrankTracker:
         return self._turned_at
 
     def hold(self) -> float:
-        if self._period is None:
-            return self.MIN_HOLD
-        return min(self.MAX_HOLD, max(self.MIN_HOLD,
-                                      self.HOLD_PERIODS * self._period))
+        period = self.UNKNOWN_PERIOD if self._period is None else self._period
+        return min(self.MAX_HOLD, max(self.MIN_HOLD, period
+                                      + self.NOTIFY_INTERVAL + self.HOLD_SLACK))
 
     def turning(self, now: float) -> bool:
         return (self.connected and self._turned_at is not None

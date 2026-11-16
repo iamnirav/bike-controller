@@ -106,6 +106,37 @@ def test_stopping_ends_turning_within_the_hold():
     assert tr.rpm(t + 3.1) == 0.0
 
 
+def ride_and_check(rpm, phase, seconds=20.0, step=0.05):
+    """Pedal steadily with 1 Hz notifications at `phase`, checking turning()
+    every `step` -- between notifications, where a gap would show. Returns
+    the times it read as stopped."""
+    tr = connected()
+    period = 60.0 / rpm
+    dropped = []
+    next_notify = phase
+    t = 0.0
+    while t < seconds:
+        if t >= next_notify:
+            revs = int(next_notify / period)
+            ticks = round(revs * period * 1024)
+            tr.submit(CrankReading(revs & 0xFFFF, ticks & 0xFFFF), now=next_notify)
+            next_notify += 1.0
+        # Allow the start: a baseline, then the first turn, then the rate.
+        if t > 4.0 and not tr.turning(t):
+            dropped.append(round(t, 2))
+        t += step
+    return dropped
+
+
+def test_a_steady_rider_is_never_dropped_between_notifications():
+    """From a real ride: at about 50 rpm with 1 Hz notifications, turns
+    arrived 2.0s apart, and the old hold of 1.5 periods dropped the rider
+    between strokes."""
+    for rpm in (40, 45, 50, 55, 60, 75, 90, 120):
+        for phase in (0.0, 0.3, 0.6, 0.9):
+            assert ride_and_check(rpm, phase) == [], (rpm, phase)
+
+
 def test_first_turn_after_a_rest_is_turning_at_unknown_rate():
     tr = connected()
     t, revs, ticks = pedal(tr, 60, 6)
