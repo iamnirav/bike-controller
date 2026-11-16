@@ -48,6 +48,7 @@ async def main() -> int:
     args = parser.parse_args()
 
     address = args.address
+    device = None
     if address is None or args.list:
         print(f"scanning {args.scan_time:.0f}s for cadence/speed sensors "
               f"(turn the crank to wake one)...")
@@ -59,7 +60,7 @@ async def main() -> int:
             return 1
         if args.list:
             return 0
-        address = found[0].address
+        address, device = found[0].address, found[0].device
         print(f"using the nearest: {found[0].name} ({address})")
 
     # Killed or hung up (an ssh session dropping), still disconnect: BlueZ
@@ -72,7 +73,7 @@ async def main() -> int:
 
     tracker = CrankTracker()
     try:
-        async with CadenceSensor(address) as sensor:
+        async with CadenceSensor(address, device) as sensor:
             tracker.link_up()
             print(f"connected to {sensor.name}; pedal. Ctrl-C to stop.\n")
             start = time.monotonic()

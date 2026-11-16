@@ -105,6 +105,8 @@ class Status:
     crank_rpm: float | None = None      # None: not connected, or rate unknown
     crank_turning: bool = False
     from_sensor: bool = False           # sensor stood in for the console
+    crank_revs: int | None = None       # raw count, for the ride log
+    crank_age: float | None = None      # seconds since the sensor last spoke
     # Set by whichever feed is running; consumed by output_loop, which logs it
     # alongside the mapping derived from that same sample.
     pending_sample: object = None
@@ -485,6 +487,7 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
             await asyncio.sleep(1.0)
             continue
         target = address
+        device = None
         try:
             # We hold no sensor here, so any the Pi has connected is an orphan
             # that a scan cannot see. Cheap: one D-Bus round trip.
@@ -499,16 +502,17 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
                 if not found:
                     await asyncio.sleep(backoff)
                     continue
-                target = found[0].address
+                target, device = found[0].address, found[0].device
             status.crank = "connecting"
             async with contextlib.AsyncExitStack() as stack:
                 async with ble_scan_lock():          # see feed_from_bike
+                    began = time.monotonic()
                     sensor = await stack.enter_async_context(
-                        CadenceSensor(target))
+                        CadenceSensor(target, device))
                 crank.link_up()
                 status.crank, status.crank_name = "connected", sensor.name
-                print(f"  cadence sensor connected: {sensor.name} ({target})",
-                      flush=True)
+                print(f"  cadence sensor connected: {sensor.name} ({target}) "
+                      f"in {time.monotonic() - began:.1f}s", flush=True)
                 backoff = 3.0
                 async for item in sensor.stream(idle_timeout=1.0):
                     if not enabled():
@@ -671,6 +675,11 @@ async def output_loop(
         status.crank_rpm = out.crank_rpm
         status.crank_turning = mapper.crank.turning(now)
         status.from_sensor = out.from_sensor
+        reported = mapper.crank.last_report_at
+        live = mapper.crank.connected
+        status.crank_revs = mapper.crank.revolutions if live else None
+        status.crank_age = (now - reported if live and reported is not None
+                            else None)
         # Take power from the same evaluate() that produced `move`, not from the
         # feed task -- otherwise the two can be a sample apart and the status
         # line implies a relationship between them that isn't real.

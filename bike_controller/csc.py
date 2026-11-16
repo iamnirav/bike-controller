@@ -115,6 +115,8 @@ class CrankTracker:
         self._last: CrankReading | None = None
         self._turned_at: float | None = None
         self._period: float | None = None
+        self._reported_at: float | None = None
+        self._run_started_at: float | None = None
         self.turns = 0
 
     def link_up(self) -> None:
@@ -131,11 +133,15 @@ class CrankTracker:
         self._last = None
         self._turned_at = None
         self._period = None
+        self._reported_at = None
+        self._run_started_at = None
 
     def submit(self, reading: CrankReading, now: float) -> bool:
         """Feed one decoded measurement. Returns True if it was a new turn."""
+        was_turning = self.turning(now)
         last = self._last
         self._last = reading
+        self._reported_at = now
         if last is None:
             # A baseline, not a turn: the count says how many revolutions
             # ever, not that one just happened.
@@ -159,6 +165,9 @@ class CrankTracker:
         else:
             # Proven turning, rate not yet known. The next revolution fixes it.
             self._period = None
+        if not was_turning:
+            # The first turn after a stop (or ever): a new run of pedalling.
+            self._run_started_at = now
         self._turned_at = now
         self.turns += 1
         return True
@@ -166,6 +175,21 @@ class CrankTracker:
     @property
     def last_turn_at(self) -> float | None:
         return self._turned_at
+
+    @property
+    def last_report_at(self) -> float | None:
+        """When the sensor last said anything, turn or not."""
+        return self._reported_at
+
+    @property
+    def run_started_at(self) -> float | None:
+        """When the current (or last) unbroken run of turning began."""
+        return self._run_started_at
+
+    @property
+    def revolutions(self) -> int | None:
+        """The sensor's raw cumulative count, for the ride log."""
+        return None if self._last is None else self._last.revolutions
 
     def hold(self) -> float:
         period = self.UNKNOWN_PERIOD if self._period is None else self._period

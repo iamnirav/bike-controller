@@ -47,6 +47,11 @@ FIELDS = [
     # latency can be read against the console's pause after a real ride.
     "crank_rpm",
     "from_sensor",
+    # The sensor's raw cumulative revolution count and how long ago it last
+    # reported, blank without one. Its rpm alone cannot say whether a late
+    # restart was a sensor that did not count, or one that did not report.
+    "crank_revs",
+    "crank_age",
 ]
 
 
@@ -125,6 +130,10 @@ class RideLogger:
                 ("" if getattr(status, "crank_rpm", None) is None
                  else f"{status.crank_rpm:.1f}"),
                 int(getattr(status, "from_sensor", False)),
+                ("" if getattr(status, "crank_revs", None) is None
+                 else status.crank_revs),
+                ("" if getattr(status, "crank_age", None) is None
+                 else f"{status.crank_age:.2f}"),
             ])
             self.rows += 1
             # Flushed per row: a ride ends with a power cut or a Ctrl-C far more

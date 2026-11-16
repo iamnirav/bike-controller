@@ -380,7 +380,7 @@ reporting through the pause:
 
 | | Without the sensor | With the sensor |
 |---|---|---|
-| You stop | your old speed for ~2s, then held ~5s more | the floor within ~1.5s (the sensor's hold is 1.5–3s; distance stalls in ~1s) |
+| You stop | your old speed for ~2–4s, then held ~5s more | the floor about 2s after your last revolution (one turn plus one sensor report) |
 | You pedal through the pause | held at your old speed; forced movement stops | speed follows the sensor; forced movement keeps going |
 | Sensor off, missing or dropped | — | exactly the behaviour without it |
 
@@ -392,12 +392,21 @@ dual-mode sensors in speed mode, are recognised and skipped.
 
 How it decides:
 
-- **During the pause** it acts only on a revolution seen *since the pause
-  began*. The sensor's "still turning" outlasts your last revolution by a
-  second or more, and without that rule a rider who stopped during the freeze
-  would walk again for a moment.
-- **During the freeze** it calls a stop only when the sensor sees nothing *and*
-  the console's distance has stalled. One witness alone is too easy to fool.
+- **During the pause** it acts on a revolution seen *since the pause began*,
+  or on a run of revolutions that began after a stop the sensor saw, up to 4s
+  before it: a rider who restarts inside the freeze is pedalling before the
+  zeros arrive. Not on the tail of the run you stopped from -- the sensor's
+  "still turning" outlasts your last revolution by a couple of seconds, and a
+  rider who had stopped would walk again for a moment.
+- **While the console still says you're pedalling** the sensor's stop wins.
+  The console keeps reporting pedalling, distance and all, for 2–4s after the
+  cranks stop. But only a stop the sensor *witnessed*: it saw a turn in the
+  last 10s, it reported in the last 2.5s, and the console was already live
+  before that turn. So a sensor that fell off the crank, went quiet, or has
+  yet to see your first revolution back cannot pin you to the floor.
+- **Between reports** "turning" lasts one revolution plus one report interval
+  (the sensor reports about once a second), so a slow rider is not dropped
+  between strokes.
 - **Effort during the pause** is your last live watts scaled by the sensor's
   cadence. The console's power is roughly linear in cadence at a fixed
   resistance, but with an offset, so this over-reads somewhat if you resume much
@@ -409,14 +418,19 @@ How it decides:
 - **A dead console link** is still the console's fault path: the floor. The
   sensor stands in for a console that is pausing, not one that has gone.
 
-**Not yet measured on real hardware:** how quickly a sensor reports the first
-revolution after a rest. These sensors notify about once a second and may doze
-when idle, so expect somewhere between one and two seconds. That is still well
-under the five-second pause. Check yours with `tools/crank_probe.py`. The ride
-log records the sensor's cadence and when it drove movement (`crank_rpm`,
-`from_sensor`), so a ride shows the real numbers. Two Bluetooth links on the
-Pi's one radio might also cost bike telemetry rate. Compare the Hz on the live
-page with the sensor on and off.
+**Measured with a Moofit CS8:** it reports once a second and never goes quiet,
+even after a 16s rest, and a restart shows up on its next report -- about 0.5 to
+1.5s after your legs move, against the console's five. Once, a restart came
+through about 4s late, and the cause is not known yet. The ride log records the
+sensor's cadence, raw revolution count, the age of its last report, and when it
+drove movement (`crank_rpm`, `crank_revs`, `crank_age`, `from_sensor`), so the
+next one can be read. Bike telemetry stays at about 2 rows a second with the
+sensor connected, the same as every ride before it. Check your own sensor with
+`tools/crank_probe.py`.
+
+A connected sensor stops advertising, and the Pi's Bluetooth keeps a link up
+after the process that opened it has died. Before every search the bridge
+disconnects any cycling sensor the Pi holds that the bridge isn't using.
 
 Most of these sensors accept one Bluetooth connection at a time, so a phone
 app holding the sensor locks the bridge out.

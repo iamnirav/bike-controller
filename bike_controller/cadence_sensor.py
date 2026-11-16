@@ -42,6 +42,10 @@ class Found:
     address: str
     name: str
     rssi: int | None
+    # What the scan saw, for connecting. Handing BleakClient a bare address
+    # makes it scan AGAIN, for up to its whole timeout, before connecting --
+    # most of the ~40s connects measured on the Pi.
+    device: object = None
 
 
 async def scan(timeout: float = 8.0) -> list[Found]:
@@ -57,7 +61,7 @@ async def scan(timeout: float = 8.0) -> list[Found]:
             continue
         found.append(Found(device.address,
                            adv.local_name or device.name or "?",
-                           adv.rssi))
+                           adv.rssi, device))
     found.sort(key=lambda f: -(f.rssi if f.rssi is not None else -999))
     return found
 
@@ -120,9 +124,12 @@ class CadenceSensor:
     # rather than sat on forever looking connected.
     WHEEL_ONLY_LIMIT = 5
 
-    def __init__(self, address: str) -> None:
+    def __init__(self, address: str, device=None) -> None:
+        """`device` is the BLEDevice a scan returned, when there is one: it
+        lets the connect skip a second scan. A bare address still works."""
         self.address = address
         self.name = address
+        self._device = device
         self._client: BleakClient | None = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         self._failure: BaseException | None = None
@@ -164,10 +171,9 @@ class CadenceSensor:
         self._put((at, reading))
 
     async def __aenter__(self) -> "CadenceSensor":
-        # 40s, not bleak's usual 20: with the bike's link busy on the same
-        # radio, the first good connect to a Moofit CS8 took about 21s, and
-        # several 20s attempts timed out at the link layer.
-        self._client = BleakClient(self.address, timeout=40.0,
+        # 40s, not bleak's usual 20, for a pinned address: then there is no
+        # scan result to hand over, and bleak's own scan comes out of this.
+        self._client = BleakClient(self._device or self.address, timeout=40.0,
                                    disconnected_callback=self._on_disconnect)
         await self._client.__aenter__()
         try:

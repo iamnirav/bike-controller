@@ -1147,6 +1147,130 @@ def test_the_gauge_shows_the_effort_a_hold_is_standing_on():
     assert out.power == 70.0, out.power
 
 
+def drive(m, t0, t1, console, turn_times, report_every=1.0):
+    """The bike and a 1 Hz sensor together, in time order.
+
+    console(t) -> (cadence, power, distance) at the deployed rate. The sensor
+    reports every `report_every` from t0 with the count of turn_times so far,
+    as a real one does: a turn reaches us at the next report, and between
+    turns it repeats itself. Returns [(t, out)] at each console sample.
+    """
+    turns = sorted(turn_times)
+    events = []
+    t = t0
+    while t < t1:
+        events.append((t, "bike"))
+        t += 1.0 / DEPLOYED_HZ
+    t = t0
+    while t < t1:
+        events.append((t, "sensor"))
+        t += report_every
+    events.sort(key=lambda e: (e[0], e[1] == "bike"))
+    trace = []
+    for t, kind in events:
+        if kind == "sensor":
+            done = [x for x in turns if x <= t]
+            last = done[-1] if done else -100.0
+            m.crank.submit(CrankReading(len(done) & 0xFFFF,
+                                        round(last * 1024) & 0xFFFF), now=t)
+        else:
+            cadence, power, distance = console(t)
+            m.submit(cadence, power, now=t, distance=distance)
+            trace.append((t, m.evaluate(now=t)))
+    return trace
+
+
+def every(start, end, rpm):
+    period = 60.0 / rpm
+    n = int((end - start) / period + 1e-9)
+    return [start + period * (i + 1) for i in range(n)]
+
+
+def pedalling(t):
+    return 75.0, 90.0, 100 + int(t * 12)
+
+
+def test_the_sensor_ends_movement_while_the_console_lags():
+    """From a real ride: the console kept reporting pedalling, distance and
+    all, for 2-4s after the cranks stopped. The sensor's stop wins."""
+    m = sensor_mapper()
+    m.crank.link_up()
+    trace = drive(m, 0.0, 10.0, pedalling, every(0.0, 5.0, rpm=75))
+    before = [o for t, o in trace if 2.0 < t < 5.0]
+    after = [o for t, o in trace if t > 7.6]
+    assert before and all(o.forced > 0.5 for o in before)
+    assert after and all(o.forced == 0.0 and o.movement_scale == 0.5
+                         for o in after), [(round(t, 2), o.forced)
+                                           for t, o in trace if t > 5]
+
+
+def test_a_sensor_that_never_turns_cannot_stop_a_pedalling_rider():
+    """Fallen off the crank, or on another bike: it talks, it never turns.
+    The console's pedalling must stand."""
+    m = sensor_mapper()
+    m.crank.link_up()
+    trace = drive(m, 0.0, 30.0, pedalling, [])
+    assert all(o.forced > 0.5 for t, o in trace if t > 1.5)
+
+
+def test_a_sensor_whose_turns_stopped_long_ago_cannot_stop_a_rider():
+    m = sensor_mapper()
+    m.crank.link_up()
+    trace = drive(m, 0.0, 30.0, pedalling, every(0.0, 3.0, rpm=60))
+    late = [o for t, o in trace if t > 3.0 + Mapper.SENSOR_TRUST + 0.5]
+    assert late and all(o.forced > 0.5 for o in late)
+
+
+def test_a_silent_sensor_is_not_read_as_a_stop():
+    m = sensor_mapper()
+    m.crank.link_up()
+    drive(m, 0.0, 5.0, pedalling, every(0.0, 5.0, rpm=75))
+    # The sensor says nothing more; the console carries on.
+    out, t, _ = ride(m, 5.0, t0=5.0, distance0=200)
+    assert out.forced > 0.5, out
+
+
+def test_a_restart_the_console_saw_first_is_not_overruled():
+    """Coming back from the pause, the console can report pedalling before
+    the sensor's first revolution reaches us. The sensor's 'stopped' is about
+    the PREVIOUS run and must not pin the rider to the floor."""
+    m = sensor_mapper()
+    m.crank.link_up()
+
+    def console(t):
+        if t < 5.0:
+            return pedalling(t)
+        if t < 10.0:
+            return 0.0, 0.0, 0                      # stopped, then the pause
+        return pedalling(t)                         # back, before the sensor
+
+    trace = drive(m, 0.0, 13.0, console, every(0.0, 4.0, rpm=75))
+    back = [o for t, o in trace if 10.5 < t < 13.0]
+    assert back and all(o.forced > 0.5 for o in back), back
+
+
+def test_a_restart_inside_the_freeze_carries_into_the_pause():
+    """Stop, then pedal again while the console is still frozen: you are
+    pedalling before its zeros arrive, and must not drop to the floor at
+    them while waiting for the next revolution to be reported."""
+    m = sensor_mapper()
+    m.crank.link_up()
+
+    def console(t):
+        if t < 5.0:
+            return pedalling(t)
+        if t < 7.0:
+            return 75.0, 90.0, 100 + int(5.0 * 12)  # the freeze
+        return 0.0, 0.0, 0                          # the pause
+
+    turns = every(0.0, 3.0, rpm=60) + every(5.6, 9.0, rpm=60)
+    trace = drive(m, 0.0, 9.0, console, turns)
+    pause_out = [o for t, o in trace if 7.0 <= t < 9.0]
+    assert pause_out and all(o.from_sensor and o.movement_scale > 0.5
+                             and o.forced > 0.5 for o in pause_out), \
+        [(round(t, 2), o.movement_scale, o.forced) for t, o in trace if t > 5]
+
+
 def test_sprint_follows_the_estimate_through_the_pause():
     m = sensor_mapper(sprint_at=60.0)
     crank = Crank(m)
