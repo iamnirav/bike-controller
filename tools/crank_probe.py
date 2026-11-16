@@ -35,7 +35,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bike_controller.cadence_sensor import CadenceSensor, NoCrankData, scan  # noqa: E402
+from bike_controller.cadence_sensor import (                          # noqa: E402
+    CadenceSensor, NoCrankData, find, scan)
 from bike_controller.csc import CrankTracker                                  # noqa: E402
 
 
@@ -71,6 +72,13 @@ async def main() -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         loop.add_signal_handler(sig, task.cancel)
 
+    if device is None:
+        one = await find(address, args.scan_time)
+        if one is None:
+            print(f"{address} not found (turn the crank to wake it)")
+            return 1
+        device = one.device
+
     tracker = CrankTracker()
     try:
         async with CadenceSensor(address, device) as sensor:
@@ -88,10 +96,10 @@ async def main() -> int:
                 if item is None:
                     continue
                 at, reading = item
-                rpm = tracker.rpm(at)
-                rate = ("  -- " if rpm is None else f"{rpm:5.1f}")
                 previous = tracker.last_turn_at
                 new = tracker.submit(reading, at)
+                rpm = tracker.rpm(at)
+                rate = ("  -- " if rpm is None else f"{rpm:5.1f}")
                 since = ""
                 if new and (previous is None or at - previous > 3.0):
                     since = ("   <- first turn" if previous is None

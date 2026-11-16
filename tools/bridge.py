@@ -473,7 +473,7 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
     can do is fail to help.
     """
     from bike_controller.cadence_sensor import (
-        CadenceSensor, NoCrankData, release_stranded, scan)
+        CadenceSensor, NoCrankData, find, release_stranded, scan)
 
     crank = mapper.crank
     enabled = lambda: mapper.config.crank_sensor.enabled      # noqa: E731
@@ -487,28 +487,36 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
             await asyncio.sleep(1.0)
             continue
         target = address
-        device = None
         try:
             # We hold no sensor here, so any the Pi has connected is an orphan
             # that a scan cannot see. Cheap: one D-Bus round trip.
             for orphan in await release_stranded(address):
                 print(f"  cadence sensor: released a stranded link to {orphan}",
                       flush=True)
-            if target is None:
-                status.crank = "searching"
-                async with ble_scan_lock():
+            # Scans take the lock; the connect does not. Handed the device a
+            # scan found, it scans no further -- and a sensor connect takes
+            # 20-40s, which the bike, the device that matters, must not wait
+            # behind if it needs to reconnect.
+            status.crank = "searching"
+            async with ble_scan_lock():
+                if target is None:
                     found = [f for f in await scan(8.0)
                              if f.address not in not_cadence]
-                if not found:
-                    await asyncio.sleep(backoff)
-                    continue
-                target, device = found[0].address, found[0].device
+                else:
+                    one = await find(target, 8.0)
+                    found = [] if one is None else [one]
+            if not found:
+                await asyncio.sleep(3.0)
+                continue
+            target, device = found[0].address, found[0].device
             status.crank = "connecting"
             async with contextlib.AsyncExitStack() as stack:
-                async with ble_scan_lock():          # see feed_from_bike
-                    began = time.monotonic()
-                    sensor = await stack.enter_async_context(
-                        CadenceSensor(target, device))
+                began = time.monotonic()
+                sensor = await stack.enter_async_context(
+                    CadenceSensor(target, device))
+                # Runs before the disconnect is awaited (exit order is LIFO),
+                # so a sensor on its way out never has a say meanwhile.
+                stack.callback(crank.link_down)
                 crank.link_up()
                 status.crank, status.crank_name = "connected", sensor.name
                 print(f"  cadence sensor connected: {sensor.name} ({target}) "
@@ -527,7 +535,10 @@ async def feed_from_crank(address: str | None, mapper: Mapper,
             print(f"  cadence sensor skipped: {exc}", flush=True)
             if target is not None and address is None:
                 not_cadence.add(target)
+            # A pinned speed sensor stays one: back off rather than reconnect
+            # to it every few seconds forever.
             await asyncio.sleep(backoff)
+            backoff = min(30.0, backoff * 1.5)
         except Exception as exc:                                 # noqa: BLE001
             status.crank = "retrying"
             print(f"  cadence sensor down ({type(exc).__name__}: {exc}); "

@@ -392,21 +392,27 @@ dual-mode sensors in speed mode, are recognised and skipped.
 
 How it decides:
 
-- **During the pause** it acts on a revolution seen *since the pause began*,
-  or on a run of revolutions that began after a stop the sensor saw, up to 4s
-  before it: a rider who restarts inside the freeze is pedalling before the
-  zeros arrive. Not on the tail of the run you stopped from -- the sensor's
-  "still turning" outlasts your last revolution by a couple of seconds, and a
-  rider who had stopped would walk again for a moment.
-- **While the console still says you're pedalling** the sensor's stop wins.
-  The console keeps reporting pedalling, distance and all, for 2–4s after the
-  cranks stop. But only a stop the sensor *witnessed*: it saw a turn in the
-  last 10s, it reported in the last 2.5s, and the console was already live
-  before that turn. So a sensor that fell off the crank, went quiet, or has
-  yet to see your first revolution back cannot pin you to the floor.
+- **While the console says you're pedalling** the sensor's stop wins. The
+  console keeps reporting pedalling, distance and all, for 2–4s after the
+  cranks stop. But only a stop the sensor *witnessed*: a turn in the last 10s,
+  with the console already live before it. A sensor that fell off the crank,
+  or has yet to report your first revolution back, can't pin you to the floor.
+  While the sensor sees turns, forced movement keeps going even if the
+  console's distance stalls.
+- **During the pause** a revolution reported since it began means you are
+  pedalling through it. If the pause begins while the sensor still has you
+  turning, you keep your speed until its next report settles it: a restart
+  carries straight on, and a real stop reaches the floor when the hold runs
+  out -- up to about 0.75s later than it would otherwise, and longer at very
+  slow cadence. That is the price of no dip on a quick stop-and-go.
+- **A sensor that goes quiet** for 1.4s has no say at all, so a stalled link
+  is never read as a stop. In the pause, the grace hold takes over again.
 - **Between reports** "turning" lasts one revolution plus one report interval
   (the sensor reports about once a second), so a slow rider is not dropped
   between strokes.
+- **The sensor's own clock** is checked against when its reports arrived. One
+  that paused while the crank was still, as the Moofit CS8's seems to, would
+  otherwise give a confident cadence that leaves the stop out.
 - **Effort during the pause** is your last live watts scaled by the sensor's
   cadence. The console's power is roughly linear in cadence at a fixed
   resistance, but with an offset, so this over-reads somewhat if you resume much
@@ -430,7 +436,10 @@ sensor connected, the same as every ride before it. Check your own sensor with
 
 A connected sensor stops advertising, and the Pi's Bluetooth keeps a link up
 after the process that opened it has died. Before every search the bridge
-disconnects any cycling sensor the Pi holds that the bridge isn't using.
+disconnects any cycling sensor the Pi holds that the bridge isn't using --
+including one `crank_probe.py` is using, so switch the dial off before
+probing. Connecting takes 20–40s, and the same whether or not the crank turns,
+so expect that wait once after the bridge starts.
 
 Most of these sensors accept one Bluetooth connection at a time, so a phone
 app holding the sensor locks the bridge out.

@@ -66,6 +66,9 @@ async def scan(timeout: float = 8.0) -> list[Found]:
     return found
 
 
+DBUS_TIMEOUT = 5.0
+
+
 async def release_stranded(also: str | None = None) -> list[str]:
     """Disconnect cycling sensors BlueZ holds that nobody is using.
 
@@ -73,7 +76,10 @@ async def release_stranded(also: str | None = None) -> list[str]:
     keeps an LE link up after the process that opened it has gone, if that
     process died without disconnecting (a killed probe did exactly this, and
     the bridge then searched for 17 minutes). Call it only when we hold no
-    sensor ourselves: anything connected then is an orphan.
+    sensor ourselves: anything connected then is treated as an orphan. That
+    includes one another process on this machine is using (crank_probe.py run
+    while the bridge searches): on a Pi that exists to run the bridge, the
+    bridge wins.
 
     Matches the CSC service, which BlueZ lists once services were resolved, or
     `also` (a pinned address). Linux only; elsewhere returns [] untouched.
@@ -87,11 +93,13 @@ async def release_stranded(also: str | None = None) -> list[str]:
     released = []
     bus = None
     try:
-        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-        reply = await bus.call(Message(
+        # Bounded: a wedged bluetoothd must not hang the sensor task forever.
+        bus = await asyncio.wait_for(
+            MessageBus(bus_type=BusType.SYSTEM).connect(), DBUS_TIMEOUT)
+        reply = await asyncio.wait_for(bus.call(Message(
             destination="org.bluez", path="/",
             interface="org.freedesktop.DBus.ObjectManager",
-            member="GetManagedObjects"))
+            member="GetManagedObjects")), DBUS_TIMEOUT)
         if reply.message_type == MessageType.ERROR:
             return []
         for path, ifaces in reply.body[0].items():
@@ -103,9 +111,10 @@ async def release_stranded(also: str | None = None) -> list[str]:
             if CSC_SERVICE not in uuids and not (
                     also and address.upper() == also.upper()):
                 continue
-            await bus.call(Message(destination="org.bluez", path=path,
-                                   interface="org.bluez.Device1",
-                                   member="Disconnect"))
+            await asyncio.wait_for(bus.call(Message(
+                destination="org.bluez", path=path,
+                interface="org.bluez.Device1", member="Disconnect")),
+                DBUS_TIMEOUT)
             released.append(address)
     except Exception:                                       # noqa: BLE001
         # A cleanup, never a reason to stop looking for the sensor.
@@ -114,6 +123,14 @@ async def release_stranded(also: str | None = None) -> list[str]:
         if bus is not None:
             bus.disconnect()
     return released
+
+
+async def find(address: str, timeout: float = 8.0) -> Found | None:
+    """A pinned sensor, found by address, so the connect needs no scan."""
+    device = await BleakScanner.find_device_by_address(address, timeout=timeout)
+    if device is None:
+        return None
+    return Found(device.address, device.name or "?", None, device)
 
 
 class CadenceSensor:
@@ -134,7 +151,6 @@ class CadenceSensor:
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         self._failure: BaseException | None = None
         self._wheel_only = 0
-        self.notifications = 0
 
     def _put(self, item) -> None:
         try:
@@ -155,7 +171,6 @@ class CadenceSensor:
 
     def _on_notify(self, _char, raw: bytearray) -> None:
         at = time.monotonic()
-        self.notifications += 1
         try:
             reading = parse_measurement(bytes(raw))
         except ValueError:

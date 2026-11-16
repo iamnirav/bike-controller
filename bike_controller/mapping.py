@@ -238,12 +238,12 @@ class CrankSensorConfig:
       - Pause, sensor sees no turns: you stopped. Straight to the floor, no hold.
       - Pause, sensor sees turns: you are pedalling through it. Movement,
         sprint and forced movement follow an effort estimated from the sensor.
-      - Freeze, sensor sees no turns and distance has stalled: you stopped.
-        The floor at once, rather than two more seconds of your old speed.
+      - Console says pedalling, sensor saw the cranks stop: you stopped. The
+        floor, rather than the 2-4s the console keeps reporting effort.
 
-    Everything else -- live telemetry, a dead console link -- is the console's
-    call as before. A sensor that is off, missing or disconnected changes
-    nothing at all: the grace hold comes back as the fallback.
+    See Mapper._judge_sensor for the exact rules. A dead console link is the
+    console's call as before. A sensor that is off, missing, disconnected or
+    silent changes nothing at all: the grace hold comes back as the fallback.
     """
 
     enabled: bool = False
@@ -378,7 +378,6 @@ class Mapper:
         # The effort that earned it, so the gauge can show what a hold is
         # standing on rather than the console's zero.
         self._last_live_effort = 0.0
-        self._blackout_since: float | None = None
         self._last_reading: tuple | None = None
         self._reading_changed_at: float | None = None
         self._frozen_reported = False
@@ -388,13 +387,12 @@ class Mapper:
         # The crank sensor, fed by the bridge's sensor task. Always present so
         # callers need no None checks; it reports nothing until connected.
         self.crank = CrankTracker()
-        # When the console's current run of all-zero readings began. Unlike
-        # _blackout_since this is kept whether or not movement is enabled,
-        # because forced movement needs it too.
+        # When the console's current run of all-zero readings began: its pause,
+        # for the grace hold, forced movement and the crank sensor alike.
         self._zeros_since: float | None = None
         # When the console's current run of live (non-zero) readings began:
         # the end of its last pause. A sensor's stop is only believed for a run
-        # of turns the console was already live for -- see _sensor_says_stopped.
+        # of turns the console was already live for -- see _judge_sensor.
         self._live_since: float | None = None
         # The last live (cadence, power) pair, the reference for estimating
         # power from the sensor's cadence during a pause.
@@ -402,6 +400,9 @@ class Mapper:
         # Set by _movement() each frame, read by evaluate().
         self._from_sensor = False
         self._effort = 0.0
+        # The sensor's verdict, worked out once per moment (see _judge_sensor).
+        self._verdict_at: float | None = None
+        self._verdict: str | None = None
 
     def submit(self, cadence_rpm: float, power_w: float = 0.0,
                now: float | None = None, distance: float | None = None) -> None:
@@ -450,82 +451,72 @@ class Mapper:
         self.tracker.submit(cadence_rpm, now)
 
     # --- The crank sensor ---------------------------------------------------
+    #
+    # One verdict per moment, read by both the movement scale and forced
+    # movement, so the two can never disagree about what the sensor saw:
+    #
+    #   STOPPED    the cranks are still, and the sensor's word beats the
+    #              console's (its pause zeros, or the 2-4s it keeps reporting
+    #              pedalling after you stop).
+    #   PEDALLING  turning: with the console live, alongside its numbers; in
+    #              its pause, with a revolution seen since the pause began.
+    #   HOLDING    the pause began while the sensor still had you turning, and
+    #              no revolution has been reported since. Either you stopped
+    #              (the hold runs out: STOPPED) or you restarted and the next
+    #              report shows it (PEDALLING). Holding your last speed meanwhile
+    #              costs a real stop up to the rest of the hold, and saves a
+    #              short stop-and-go from a dip to the floor at the zeros.
+    #   None       no say: the console (or, in its pause, the grace hold)
+    #              decides exactly as without a sensor.
+    STOPPED, PEDALLING, HOLDING = "stopped", "pedalling", "holding"
+    # Its "stopped" overrules a live console only for a turn this recent.
+    # Older, and it is a sensor that fell off the crank or sits on another
+    # bike, which must not pin a pedalling rider to the floor.
+    SENSOR_TRUST = 10.0
+    # A sensor that has not reported for this long has no say at all. Shorter
+    # than any hold (CrankTracker.MIN_HOLD), so silence is never read as a
+    # stop; longer than its ~1s report interval plus jitter.
+    SENSOR_QUIET = 1.4
 
-    def _sensor_live(self) -> bool:
+    def _sensor_connected(self) -> bool:
         return self.config.crank_sensor.enabled and self.crank.connected
 
-    def _console_paused(self, now: float) -> bool:
-        """Live frames, all zeros: the console's pause (or an idle bike)."""
-        return self._zeros_since is not None and not self.tracker.is_stale(now)
+    def _sensor_verdict(self, now: float) -> str | None:
+        if now != self._verdict_at:
+            self._verdict_at = now
+            self._verdict = self._judge_sensor(now)
+        return self._verdict
 
-    # A run of turns that began this long before the console's zeros still
-    # counts as pedalling through the pause: a rider who stops briefly and
-    # restarts during the ~2s freeze is pedalling again BEFORE the zeros
-    # arrive. Freeze plus the console's own lag in noticing the stop.
-    RESTART_BEFORE_PAUSE = 4.0
-    # How recently the sensor must have seen a turn, and spoken at all, for
-    # its "stopped" to overrule a console that says you are pedalling.
-    SENSOR_TRUST = 10.0
-    SENSOR_QUIET = 2.5
-
-    def _sensor_pedalling_through_pause(self, now: float) -> bool:
-        """The sensor sees pedalling that began, or continued, into the pause.
-
-        A turn SINCE the pause began counts. So does a run of turns that
-        started (after a stop the sensor saw) shortly before it: the rider
-        restarted inside the freeze. What does not count is the hold left over
-        from a run that began long before -- the sensor holds "turning" for a
-        couple of seconds after the last revolution, which would otherwise
-        carry the rider's stop into the pause and walk them again for a moment
-        after they had already stopped.
-        """
-        if not (self._sensor_live() and self._console_paused(now)):
-            return False
-        if not self.crank.turning(now):
-            return False
-        turned = self.crank.last_turn_at
-        if turned is not None and turned >= self._zeros_since:
-            return True
-        run = self.crank.run_started_at
-        return (run is not None
-                and run >= self._zeros_since - self.RESTART_BEFORE_PAUSE)
-
-    def _sensor_says_stopped(self, now: float) -> bool:
-        """Console still reporting effort, but the cranks have stopped.
-
-        The console keeps reporting pedalling for 2-4s after the cranks stop
-        (its freeze, and its distance still climbing), so the sensor's word is
-        the faster one -- but only as a stop it WITNESSED:
-
-          * it saw a turn recently, so a sensor that fell off the crank or sits
-            on another bike cannot pin a pedalling rider to the floor;
-          * it is still reporting, so a silent sensor is not read as a stop;
-          * the console has been live since before that last turn, so a
-            restart the console noticed first is not overruled by a sensor
-            that has yet to see its first revolution.
-
-        Failing those, the old rule: distance stalled AND the sensor sees no
-        turns -- two witnesses agreeing.
-        """
-        if not self._sensor_live():
-            return False
-        if self._zeros_since is not None or self.tracker.is_stale(now):
-            return False
-        if self.crank.turning(now):
-            return False
-        turned = self.crank.last_turn_at
+    def _judge_sensor(self, now: float) -> str | None:
+        if not self._sensor_connected() or self.tracker.is_stale(now):
+            # A dead console link stays the console's fault path: the floor.
+            return None
         reported = self.crank.last_report_at
-        if (turned is not None and reported is not None
-                and now - turned <= self.SENSOR_TRUST
-                and now - reported <= self.SENSOR_QUIET
+        if reported is None or now - reported > self.SENSOR_QUIET:
+            return None
+        turning = self.crank.turning(now)
+        turned = self.crank.last_turn_at
+        if self._zeros_since is not None:
+            # The console's pause (or an idle bike).
+            if not turning:
+                return self.STOPPED
+            if turned >= self._zeros_since:
+                return self.PEDALLING
+            return self.HOLDING
+        if turning:
+            # Pedalling, as the console says -- and the push keeps going even
+            # if its distance stalls (a freeze, a dropped sample). Its own
+            # numbers still set the speed; see _movement.
+            return self.PEDALLING
+        # The console says pedalling, the sensor says still. Believe a stop the
+        # sensor WITNESSED: a recent turn, with the console already live
+        # before it -- so a restart the console noticed first is not overruled
+        # by a sensor yet to report its first revolution back.
+        if (turned is not None and now - turned <= self.SENSOR_TRUST
                 and self._live_since is not None
                 and self._live_since <= turned):
-            return True
-        if not self._have_distance:
-            return False
-        release = self.config.forced_movement.release_after
-        return (self._distance_advanced_at is None
-                or now - self._distance_advanced_at > release)
+            return self.STOPPED
+        return None
 
     def _sensor_effort(self, now: float) -> float | None:
         """Effort in the movement source's units, from the sensor's cadence.
@@ -547,12 +538,13 @@ class Mapper:
         return ref_power * rpm / ref_cadence
 
     def is_pedalling(self, now: float | None = None) -> bool:
-        """True while the distance accumulator is still climbing -- or, during
-        the console's pause, while the crank sensor sees the crank turning."""
+        """True while the distance accumulator is still climbing -- unless the
+        crank sensor, when there is one, says otherwise."""
         now = time.monotonic() if now is None else now
-        if self._sensor_pedalling_through_pause(now):
+        verdict = self._sensor_verdict(now)
+        if verdict in (self.PEDALLING, self.HOLDING):
             return True
-        if self._sensor_says_stopped(now):
+        if verdict == self.STOPPED:
             return False
         if self._distance_advanced_at is None or self.tracker.is_stale(now):
             return False
@@ -613,47 +605,47 @@ class Mapper:
         # The console's pause, seen from here: live frames still arriving, but
         # carrying nothing at all. Distance is deliberately not part of the test
         # -- it reads 0 on an untouched bike too, so it adds no discrimination.
-        blacked_out = self._power_raw <= 0 and self._cadence_raw <= 0
-        if not blacked_out:
-            self._blackout_since = None
-        else:
-            if self._blackout_since is None:
-                self._blackout_since = now
+        blacked_out = self._zeros_since is not None
+        grace_running = (blacked_out and movement.blackout_grace > 0
+                         and self._last_live_scale is not None
+                         and now - self._zeros_since < movement.blackout_grace)
 
-        # The crank sensor, when there is one, replaces the guesses below.
-        if self._sensor_says_stopped(now) or (
-                blacked_out and self._sensor_live()
-                and not self._sensor_pedalling_through_pause(now)):
-            # Stopped, and the sensor proves it: the floor, now.
-            self._from_sensor = True
+        verdict = self._sensor_verdict(now)
+        if verdict == self.STOPPED:
+            # Stopped, and the sensor proves it: the floor, now. Flagged only
+            # where the sensor changed the outcome -- an idle bike is at the
+            # floor either way, and should not read as "SENSOR".
+            self._from_sensor = grace_running or not blacked_out
             self._effort = 0.0
             self._sprinting = False
             self._at_max = False
             return movement.floor, False, False
+        # Only in the pause does the sensor's effort replace the console's: a
+        # live console's own numbers are the better measure.
         sensed = None
-        if blacked_out and self._sensor_pedalling_through_pause(now):
+        through_pause = blacked_out and verdict == self.PEDALLING
+        if through_pause:
             sensed = self._sensor_effort(now)
+        if verdict == self.HOLDING or (through_pause and sensed is None):
+            # Pedalling (or about to be shown to be), effort not measured: the
+            # first revolution after a rest is not a rate. Hold what was last
+            # earned, or the floor if nothing ever was.
             self._from_sensor = True
-            if sensed is None:
-                # Turning, rate not measured yet (the first revolution after a
-                # rest). Pedalling is proven, effort is not: hold what was last
-                # earned, or the floor if nothing ever was.
-                self._sprinting = False
-                held = self._last_live_scale
-                self._effort = 0.0 if held is None else self._last_live_effort
-                return (movement.floor if held is None else held), False, False
+            self._sprinting = False
+            held = self._last_live_scale
+            self._effort = 0.0 if held is None else self._last_live_effort
+            return (movement.floor if held is None else held), False, False
+        if sensed is not None:
+            self._from_sensor = True
             self._effort = sensed
 
-        if blacked_out and sensed is None:
-            if (movement.blackout_grace > 0
-                    and self._last_live_scale is not None
-                    and now - self._blackout_since < movement.blackout_grace):
-                # Sprint is deliberately NOT held through the grace. Holding the
-                # scale keeps the stick where it was; latching a BUTTON on no
-                # evidence is a bigger promise, and releasing it is the quieter
-                # way to be wrong.
-                self._sprinting = False
-                return self._last_live_scale, False, self._at_max
+        if blacked_out and sensed is None and grace_running:
+            # Sprint is deliberately NOT held through the grace. Holding the
+            # scale keeps the stick where it was; latching a BUTTON on no
+            # evidence is a bigger promise, and releasing it is the quieter
+            # way to be wrong.
+            self._sprinting = False
+            return self._last_live_scale, False, self._at_max
 
         if sensed is not None:
             value = sensed
@@ -759,7 +751,7 @@ class Mapper:
         out.power = (self._effort if self._from_sensor
                      and self.config.movement.source == "power"
                      else self._power_raw)
-        if self._sensor_live():
+        if self._sensor_connected():
             out.crank_rpm = self.crank.rpm(now)
         # Silence still counts as degraded, which buzzes the controller. A latch
         # does not: it is logged and left alone, because a buzz mid-firefight is

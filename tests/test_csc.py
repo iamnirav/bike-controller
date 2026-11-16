@@ -122,7 +122,7 @@ def ride_and_check(rpm, phase, seconds=20.0, step=0.05):
             tr.submit(CrankReading(revs & 0xFFFF, ticks & 0xFFFF), now=next_notify)
             next_notify += 1.0
         # Allow the start: a baseline, then the first turn, then the rate.
-        if t > 4.0 and not tr.turning(t):
+        if t > 8.0 and not tr.turning(t):
             dropped.append(round(t, 2))
         t += step
     return dropped
@@ -132,9 +132,36 @@ def test_a_steady_rider_is_never_dropped_between_notifications():
     """From a real ride: at about 50 rpm with 1 Hz notifications, turns
     arrived 2.0s apart, and the old hold of 1.5 periods dropped the rider
     between strokes."""
-    for rpm in (40, 45, 50, 55, 60, 75, 90, 120):
+    for rpm in (20, 22, 30, 40, 45, 50, 55, 60, 75, 90, 120):
         for phase in (0.0, 0.3, 0.6, 0.9):
             assert ride_and_check(rpm, phase) == [], (rpm, phase)
+
+
+def test_a_clock_that_paused_through_a_stop_gives_no_rate():
+    """From review, against a Moofit CS8, whose event clock seems to stop
+    while the crank is still. A 3s stop then one revolution: the sensor's
+    interval leaves the stop out and would read as a confident cadence. Our
+    own arrival times say the interval was really ~3.5s."""
+    tr = connected()
+    tr.submit(CrankReading(10, 10_000), now=0.0)            # baseline
+    tr.submit(CrankReading(11, 10_800), now=1.0)
+    tr.submit(CrankReading(12, 11_600), now=2.0)            # 0.78s, 77 rpm
+    assert tr.rpm(2.0) is not None
+    # Stopped ~3s; the clock did not run. One revolution, 0.8s of ticks.
+    tr.submit(CrankReading(13, 12_400), now=5.5)
+    assert tr.turning(5.5)
+    assert tr.rpm(5.5) is None, tr.rpm(5.5)
+
+
+def test_a_running_clock_still_measures_the_rate_after_a_short_stop():
+    """A slow revolution honestly timed by the sensor -- 2.4s, arriving 3s
+    after the last -- is a rate we can use."""
+    tr = connected()
+    tr.submit(CrankReading(10, 0), now=0.0)                 # baseline
+    tr.submit(CrankReading(11, 1024), now=1.0)
+    tr.submit(CrankReading(12, 2048), now=2.0)
+    tr.submit(CrankReading(13, 2048 + round(2.4 * 1024)), now=5.0)
+    assert abs(tr.rpm(5.0) - 25.0) < 0.5, tr.rpm(5.0)
 
 
 def test_first_turn_after_a_rest_is_turning_at_unknown_rate():

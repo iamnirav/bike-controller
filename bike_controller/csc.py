@@ -101,7 +101,7 @@ class CrankTracker:
     NOTIFY_INTERVAL = 1.0
     HOLD_SLACK = 0.25
     MIN_HOLD = 1.5
-    MAX_HOLD = 3.5
+    MAX_HOLD = 4.5
     # Before the rate is known (the first turn after a rest), assume nothing
     # slower than 40 rpm: 1.5s per turn.
     UNKNOWN_PERIOD = 1.5
@@ -116,8 +116,7 @@ class CrankTracker:
         self._turned_at: float | None = None
         self._period: float | None = None
         self._reported_at: float | None = None
-        self._run_started_at: float | None = None
-        self.turns = 0
+        self._gap: float | None = None
 
     def link_up(self) -> None:
         self.reset()
@@ -134,11 +133,10 @@ class CrankTracker:
         self._turned_at = None
         self._period = None
         self._reported_at = None
-        self._run_started_at = None
+        self._gap = None
 
     def submit(self, reading: CrankReading, now: float) -> bool:
         """Feed one decoded measurement. Returns True if it was a new turn."""
-        was_turning = self.turning(now)
         last = self._last
         self._last = reading
         self._reported_at = now
@@ -153,23 +151,27 @@ class CrankTracker:
             return False                    # re-baselined above
         ticks = (reading.event_time - last.event_time) & 0xFFFF
         seconds = ticks / EVENT_TICKS_PER_SECOND
-        # The event clock wraps every 64s, so after a long rest a masked
-        # interval can alias to something small and plausible. Our own clock
-        # cannot alias: only trust the sensor's interval when the previous turn
-        # we saw was recent enough for it to be real.
-        recent = (self._turned_at is not None
-                  and now - self._turned_at <= self.MAX_PERIOD * revs + 1.5)
+        # Check the sensor's interval against our own clock. Each turn reaches
+        # us up to one report after it happened, so two turns that ARRIVED
+        # `gap` apart happened within a report interval of `gap` apart. An
+        # interval outside that is not this one: the event clock wrapped
+        # during a long rest (every 64s), or it paused while the crank was
+        # still -- a Moofit CS8's does, and would otherwise report a confident
+        # cadence that leaves the stop out.
+        gap = None if self._turned_at is None else now - self._turned_at
+        slack = self.NOTIFY_INTERVAL + self.HOLD_SLACK
         period = seconds / revs
-        if recent and 0 < period <= self.MAX_PERIOD:
+        if (gap is not None and abs(seconds - gap) <= slack
+                and 0 < period <= self.MAX_PERIOD):
             self._period = period
         else:
             # Proven turning, rate not yet known. The next revolution fixes it.
             self._period = None
-        if not was_turning:
-            # The first turn after a stop (or ever): a new run of pedalling.
-            self._run_started_at = now
+        # Turns arriving this far apart are slow pedalling, not a rest ending:
+        # what the hold must cover when there is no period to go on.
+        self._gap = (gap if gap is not None
+                     and gap <= self.MAX_PERIOD + self.NOTIFY_INTERVAL else None)
         self._turned_at = now
-        self.turns += 1
         return True
 
     @property
@@ -182,17 +184,19 @@ class CrankTracker:
         return self._reported_at
 
     @property
-    def run_started_at(self) -> float | None:
-        """When the current (or last) unbroken run of turning began."""
-        return self._run_started_at
-
-    @property
     def revolutions(self) -> int | None:
         """The sensor's raw cumulative count, for the ride log."""
         return None if self._last is None else self._last.revolutions
 
     def hold(self) -> float:
-        period = self.UNKNOWN_PERIOD if self._period is None else self._period
+        if self._period is not None:
+            period = self._period
+        elif self._gap is not None:
+            # Too slow for a rate (under 24 rpm): the next turn can arrive a
+            # whole report later than this gap.
+            period = max(self.UNKNOWN_PERIOD, self._gap)
+        else:
+            period = self.UNKNOWN_PERIOD
         return min(self.MAX_HOLD, max(self.MIN_HOLD, period
                                       + self.NOTIFY_INTERVAL + self.HOLD_SLACK))
 
